@@ -1,0 +1,29 @@
+# ADA 2010 thresholds used by the rule engine. All lengths in millimetres.
+# Never hard-code these values in Python; read them from this file.
+
+door:
+  clear_width_min_mm: 815          # ADA 404.2.3  door clear width
+  threshold_max_mm: 13             # ADA 404.2.5  threshold height
+  hardware_height_mm: [865, 1220]  # ADA 404.2.7  handle height range
+  maneuvering_pull_min_mm: 1525    # ADA 404.2.4  clear depth on the pull side (simplified, front approach)
+  maneuvering_push_min_mm: 1220    # ADA 404.2.4  clear depth on the push side (simplified, front approach)
+
+room:
+  turning_diameter_min_mm: 1525    # ADA 304.3.1  turning circle (diameter, not radius)
+
+passage:
+  # A room that fails its turning space can still be passed through if no turn is
+  # needed: entry and exit doors on opposite walls and the room is wide enough.
+  straight_min_width_mm: 915       # ADA 403.5.1  clear width of the route
+  door_wall_tolerance_mm: 400      # how far a door centre may be from a room edge and still count as on that wall
+
+missing_values:
+  # What to do when a value is missing in the IFC file.
+  # "fail" = treat the element as failing (conservative, never says "reachable" by mistake)
+  policy: fail
+
+verdict:
+  # Building verdict: "accessible" if every room can be reached from the entrance.
+  # A failure that blocks no room (e.g. the last room cannot turn around) is only a warning.
+  # true = such warnings also make the building "not_accessible" (ask the advisor; default false).
+  warnings_make_not_accessible: false

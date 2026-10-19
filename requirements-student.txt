@@ -1,0 +1,7 @@
+# Only for fine-tuning the student (Qwen 7B, LoRA) on a GPU machine (Colab / lab PC).
+transformers
+peft
+trl
+datasets
+accelerate
+# vllm          # serve the fine-tuned student locally (Linux + GPU); Ollama also works

@@ -1,0 +1,6 @@
+Design a {n_rooms}-room building.
+Rooms: {rooms}
+Connections: {connections}
+Door placement: {placement}
+Target result: {label}
+Failure cause: {cause}

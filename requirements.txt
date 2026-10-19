@@ -1,0 +1,18 @@
+# core
+ifcopenshell>=0.8
+numpy
+networkx
+pyyaml
+matplotlib
+pillow
+openai          # client for Nemotron / GPT-4.1 / GPT-4.1-mini / local servers (Ollama, vLLM)
+scikit-learn    # metrics
+pytest
+
+# GNN agents
+# install torch first with the command for your machine: https://pytorch.org/get-started/locally/
+torch
+torch_geometric
+
+# web UI
+streamlit

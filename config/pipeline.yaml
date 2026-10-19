@@ -1,0 +1,25 @@
+# Settings of the accessibility check (GNN agents + main agent).
+
+agents:
+  models_dir: models        # door.pt, room.pt, route.pt written by src.agents.train
+  threshold: 0.5            # probability >= threshold counts as "yes"
+
+main_agent:
+  # auto   = try the local Qwen 7B first; if it is not running or gives invalid JSON twice,
+  #          use the fallback (GPT-4.1-mini over the API)
+  # local  = only the local model      openai = only the fallback model
+  # rule   = no LLM: fixed combination rules (baseline for the experiments, works offline)
+  provider: auto
+  local:
+    # Ollama (Windows / Mac / Linux):  ollama pull qwen2.5:7b   -> http://localhost:11434/v1
+    # vLLM (Linux + GPU):              vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 -> http://localhost:8000/v1
+    base_url: http://localhost:11434/v1
+    model: qwen2.5:7b
+    api_key_env: null       # local servers need no key
+  fallback:
+    base_url: null          # null = api.openai.com
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+  temperature: 0
+  max_tokens: 1500
+  timeout_s: 120

@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+data/llm/*.jsonl
+data/synthetic/*/
+data/real/*
+!data/real/.gitkeep
+data/council/*
+!data/council/.gitkeep
+data/datasets/*
+!data/datasets/.gitkeep
+data/demo/
+models/*
+!models/.gitkeep
+experiments/*/
+# kept locally, not published
+CLAUDE.md
+.claude/
+docs/*.pptx
