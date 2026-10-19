@@ -23,6 +23,8 @@ Usage
   # several batches: give each run a new --seed (it fixes the scenario order; every record
   # stores its seed and the script warns if the seed was already used for this role)
   python -m src.llm.generate --role teacher --provider nemotron --n 20 --seed 2
+  # several requests at the same time (answers are still saved in request order)
+  python -m src.llm.generate --role teacher --provider nemotron --n 60 --seed 3 --workers 4 --write-ifc
   # teacher, GPT-4.1 (no reasoning trace is returned by this API, only the answer)
   export OPENAI_API_KEY=sk-...
   python -m src.llm.generate --role teacher --provider openai --model gpt-4.1 --n 20
@@ -43,6 +45,7 @@ import random
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +55,7 @@ from src.ada.rules import ACCESSIBLE, EXTERIOR, NOT_ACCESSIBLE, door_side, evalu
 OUT_DIR = ROOT / "data" / "llm"
 SYSTEM_PROMPT = (ROOT / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
 USER_TEMPLATE = (ROOT / "prompts" / "user_template.txt").read_text(encoding="utf-8")
-PROMPT_VERSION = 4
+PROMPT_VERSION = 5
 
 PROVIDERS = {
     "nemotron": {"base_url": "https://integrate.api.nvidia.com/v1", "key": "NVIDIA_API_KEY",
@@ -105,18 +108,111 @@ SCENARIOS = [
 ]
 
 
-def make_user_prompt(rng: random.Random):
+# Variety comes from the code, not from the model: every request is a fresh conversation, so the
+# model cannot know what it chose before and falls back to the same defaults (prompt v4: 27 of 36
+# doors had 1000 mm hardware, R2 was always east of R1). Each prompt therefore fixes the layout,
+# approximate room sizes, the hardware type and the value that fails (half of them just past the
+# limit), and often one compliant value close to its limit, so the agents see both sides of every
+# threshold and every door orientation.
+WALL_NAMES = {"S": "south", "N": "north", "W": "west", "E": "east"}
+OPPOSITE_WALL = {"S": "N", "N": "S", "W": "E", "E": "W"}
+HARDWARE_TYPES = ["Lever", "Pull handle", "Push bar"]
+DOOR_FIELDS = ["clear_width_mm", "threshold_height_mm", "hardware_height_mm", "maneuvering_pull_mm",
+               "maneuvering_push_mm"]
+TURNING = "turning_space_diameter_mm"
+ROOM_SIDE_MM = (2600, 6000)  # approximate room sizes given in the prompt (validation allows 2500-6000)
+NEAR_MM = {"threshold_height_mm": 3}  # "close to the limit"; every other value: 30 mm
+FAR_MM = {"clear_width_mm": 165, "threshold_height_mm": 30, "hardware_height_mm": 150,  # failing values stay
+          "maneuvering_pull_mm": 400, "maneuvering_push_mm": 400, TURNING: 400}         # plausible (door >= 650)
+NEAR_SHARE = 0.5  # share of failing values just past the limit, and of prompts with a near-limit compliant value
+
+
+def value_limit(field: str, end: str | None, R: dict) -> tuple[float, str]:
+    """(limit, sense) from config/ada_rules.yaml; sense "min" = value must be >= limit, "max" = <= limit.
+    end: "high" / "low" for the hardware height range."""
+    d = R["door"]
+    if field == "hardware_height_mm":
+        lo, hi = d["hardware_height_mm"]
+        return (hi, "max") if end == "high" else (lo, "min")
+    return {"clear_width_mm": (d["clear_width_min_mm"], "min"), "threshold_height_mm": (d["threshold_max_mm"], "max"),
+            "maneuvering_pull_mm": (d["maneuvering_pull_min_mm"], "min"),
+            "maneuvering_push_mm": (d["maneuvering_push_min_mm"], "min"),
+            TURNING: (R["room"]["turning_diameter_min_mm"], "min")}[field]
+
+
+def required_value(element: str, field: str, end: str | None, fails: bool, rng: random.Random, R: dict) -> dict:
+    """A value the prompt asks for: failing (just past the limit or further) or compliant close to the limit."""
+    limit, sense = value_limit(field, end, R)
+    near = NEAR_MM.get(field, 30)
+    if fails:
+        m = rng.randint(1, near) if rng.random() < NEAR_SHARE else rng.randint(near + 1, FAR_MM[field])
+        value = limit - m if sense == "min" else limit + m
+    else:
+        m = rng.randint(0, near)
+        value = limit + m if sense == "min" else limit - m
+    return {"element": element, "field": field, "value": value, "fails": fails,
+            "limit": f"{'>=' if sense == 'min' else '<='} {limit}"}
+
+
+def make_layout(placement: str, rng: random.Random) -> dict:
+    """Wall of R1 for each door. D2 is on the wall R1 shares with R2 (R2 lies on that side of R1)."""
+    d2 = rng.choice("SNWE")
+    if placement == OPP:
+        d1 = OPPOSITE_WALL[d2]
+    elif placement == ADJ:
+        d1 = rng.choice([w for w in "SNWE" if w not in (d2, OPPOSITE_WALL[d2])])
+    else:
+        d1 = rng.choice([w for w in "SNWE" if w != d2])
+    return {"D1": d1, "D2": d2}
+
+
+def make_user_prompt(rng: random.Random, R: dict | None = None):
+    R = R or load_rules()
     sc = rng.choice(SCENARIOS)
     c = rng.choice(sc["causes"])
+    lay = make_layout(sc["placement"], rng)
+    sizes = {r: [rng.randrange(ROOM_SIDE_MM[0], ROOM_SIDE_MM[1] + 1, 50) for _ in range(2)] for r in ("R1", "R2")}
+    hardware = {d: rng.choice(HARDWARE_TYPES) for d in ("D1", "D2")}
+    values = [required_value(c["element"], c["field"], c["value"], True, rng, R)] if c["field"] else []
+    if rng.random() < NEAR_SHARE:
+        cands = [(e, f) for e in ("D1", "D2") for f in DOOR_FIELDS] + [("R1", TURNING), ("R2", TURNING)]
+        e, f = rng.choice([x for x in cands if x != (c["element"], c["field"])])
+        values.append(required_value(e, f, rng.choice(["high", "low"]), False, rng, R))
+    placement = OPP if lay["D1"] == OPPOSITE_WALL[lay["D2"]] else ADJ
     prompt = USER_TEMPLATE.format(
-        n_rooms=2, rooms="R1, R2", connections="EXTERIOR -D1- R1, R1 -D2- R2", placement=sc["placement"],
-        label=sc["label"], cause=c["text"])
-    target = {"label": sc["label"], "failing_rules": [{"element": c["element"], "rule": c["rule"]}] if c["rule"] else []}
+        n_rooms=2, rooms="R1, R2", connections="EXTERIOR -D1- R1, R1 -D2- R2",
+        layout=f"R2 lies to the {WALL_NAMES[lay['D2']]} of R1; they share R1's {WALL_NAMES[lay['D2']]} wall, "
+               f"where D2 is. The entrance door D1 is on R1's {WALL_NAMES[lay['D1']]} wall.",
+        placement=placement,
+        sizes=", ".join(f"{r} about {w} x {l} mm" for r, (w, l) in sizes.items()),
+        hardware=", ".join(f"{d} {h}" for d, h in hardware.items()),
+        label=sc["label"], cause=c["text"],
+        values="; ".join(f"{v['element']} {v['field']} = {v['value']} "
+                         f"({'fails the limit' if v['fails'] else 'complies, close to the limit'} {v['limit']})"
+                         for v in values) or "none")
+    target = {"label": sc["label"], "failing_rules": [{"element": c["element"], "rule": c["rule"]}] if c["rule"] else [],
+              "layout": lay, "sizes": sizes, "hardware": hardware, "values": values}
     return sc, c, target, prompt
 
 
 def _pairs(rules: list) -> set:
     return {(f.get("element"), f.get("rule")) for f in rules or []}
+
+
+MANEUVER_MIN_MM = 700     # plausibility: a smaller clearance is not a real design value
+EXTERIOR_DEPTH_MM = 6000  # free depth assumed outside the entrance door
+
+
+def side_depth(door: dict, side: str, rooms: dict, R: dict) -> float | None:
+    """Free floor depth on one side of a door: the depth of that room perpendicular to the door's wall
+    (None if the door is not on a wall of the room)."""
+    if side == EXTERIOR:
+        return EXTERIOR_DEPTH_MM
+    room = rooms[side]
+    wall = door_side(door, room, R)
+    if wall is None:
+        return None
+    return room["length_mm"] if wall in ("S", "N") else room["width_mm"]
 
 
 # ---------------------------------------------------------------- verification
@@ -148,11 +244,23 @@ def validate(b: dict, target: dict, rules: dict) -> list[str]:
     for d in b["doors"]:
         if not 600 <= d["clear_width_mm"] <= 1200 or not 0 <= d["threshold_height_mm"] <= 60:
             p.append(f"implausible value on {d['id']}")
-        if not 700 <= d["maneuvering_pull_mm"] <= 3000 or not 700 <= d["maneuvering_push_mm"] <= 3000:
+        pull, push = d["maneuvering_pull_mm"], d["maneuvering_push_mm"]
+        if min(pull, push) < MANEUVER_MIN_MM:
             p.append(f"implausible maneuvering clearance on {d['id']}")
-        for rid in d["connects"]:
-            if rid != EXTERIOR and door_side(d, rooms[rid], rules) is None:
+        depths = [side_depth(d, rid, rooms, rules) for rid in d["connects"]]
+        for rid, depth in zip(d["connects"], depths):
+            if depth is None:
                 p.append(f"door {d['id']} is not on a wall of {rid}")
+        # the record does not say which side is the pull side, so either assignment may fit
+        if None not in depths and not (pull <= depths[0] and push <= depths[1] or
+                                       pull <= depths[1] and push <= depths[0]):
+            p.append(f"maneuvering clearance of {d['id']} is deeper than the room on that side")
+    lay = target.get("layout")  # prompt v5+: the walls of R1 asked for each door
+    if lay:
+        doors = {d["id"]: d for d in b["doors"]}
+        for did, wall in lay.items():
+            if did not in doors or "R1" not in rooms or door_side(doors[did], rooms["R1"], rules) != wall:
+                p.append(f"door {did} is not on the {WALL_NAMES[wall]} wall of R1 as asked")
     if p:
         return p
     v = evaluate(b, rules)["verdict"]
@@ -201,29 +309,32 @@ class FakeMsg:
         self.content, self.reasoning_content = content, reasoning
 
 
-def fake_answer(sc, c, rng):
-    """Building that matches the scenario (sometimes deliberately wrong) - for --dry-run."""
-    w1, w2, L = rng.randint(4000, 5600), rng.randint(3000, 4200), rng.randint(3800, 5200)
-    door = lambda did, a, b: {"id": did, "connects": [a, b], "clear_width_mm": rng.randint(840, 1000),
-                              "threshold_height_mm": rng.choice([0, 5, 10]), "hardware_height_mm": rng.randint(900, 1150),
-                              "hardware_type": "Lever", "maneuvering_pull_mm": rng.randint(1530, 1800),
-                              "maneuvering_push_mm": rng.randint(1230, 1500)}
-    d1, d2 = door("D1", EXTERIOR, "R1"), door("D2", "R1", "R2")
-    # D2 on the east wall of R1; D1 on the west wall (opposite) or the south wall (adjacent)
-    d1.update(x_mm=0, y_mm=L / 2) if sc["placement"] == OPP or (sc["placement"] == ANY and rng.random() < .5) \
-        else d1.update(x_mm=w1 / 2, y_mm=0)
-    d2.update(x_mm=w1, y_mm=L / 2)
-    rooms = [{"id": "R1", "x_mm": 0, "y_mm": 0, "width_mm": w1, "length_mm": L,
+def fake_answer(sc, target, rng):
+    """Building that follows the prompt (layout, sizes, hardware, required values), with a deliberately
+    wrong intended_verdict now and then - for --dry-run and the tests."""
+    lay = target["layout"]
+    (w1, l1), (w2, l2) = target["sizes"]["R1"], target["sizes"]["R2"]
+    w2, l2 = (w2, l1) if lay["D2"] in "EW" else (w1, l2)  # R2 shares one whole wall of R1
+    x2, y2 = {"E": (w1, 0), "W": (-w2, 0), "N": (0, l1), "S": (0, -l2)}[lay["D2"]]
+    dx, dy = max(0, -x2), max(0, -y2)  # shift so that every coordinate is >= 0
+    mid = {"S": (w1 / 2, 0), "N": (w1 / 2, l1), "W": (0, l1 / 2), "E": (w1, l1 / 2)}  # wall centres of R1
+
+    def door(did, a, b_):
+        x, y = mid[lay[did]]
+        return {"id": did, "connects": [a, b_], "x_mm": x + dx, "y_mm": y + dy,
+                "clear_width_mm": rng.randint(840, 1000), "threshold_height_mm": rng.choice([0, 5, 10]),
+                "hardware_height_mm": rng.randint(900, 1150), "hardware_type": target["hardware"][did],
+                "maneuvering_pull_mm": rng.randint(1530, 1800), "maneuvering_push_mm": rng.randint(1230, 1500)}
+
+    rooms = [{"id": "R1", "x_mm": dx, "y_mm": dy, "width_mm": w1, "length_mm": l1,
               "turning_space_diameter_mm": 1525 + rng.randint(0, 300)},
-             {"id": "R2", "x_mm": w1, "y_mm": 0, "width_mm": w2, "length_mm": L,
+             {"id": "R2", "x_mm": x2 + dx, "y_mm": y2 + dy, "width_mm": w2, "length_mm": l2,
               "turning_space_diameter_mm": 1525 + rng.randint(0, 300)}]
-    if c["field"]:
-        el = {"D1": d1, "D2": d2, "R1": rooms[0], "R2": rooms[1]}[c["element"]]
-        el[c["field"]] = {"clear_width_mm": rng.randint(690, 790), "threshold_height_mm": rng.randint(20, 35),
-                          "hardware_height_mm": rng.randint(1250, 1350) if c["value"] == "high" else rng.randint(700, 840),
-                          "maneuvering_pull_mm": rng.randint(1100, 1450), "maneuvering_push_mm": rng.randint(900, 1150),
-                          "turning_space_diameter_mm": rng.randint(1100, 1450)}[c["field"]]
-    b = {"rooms": rooms, "doors": [d1, d2]}
+    doors = [door("D1", EXTERIOR, "R1"), door("D2", "R1", "R2")]
+    elements = {e["id"]: e for e in rooms + doors}
+    for v in target["values"]:
+        elements[v["element"]][v["field"]] = v["value"]
+    b = {"rooms": rooms, "doors": doors}
     v = evaluate(b)["verdict"]
     iv = {"label": v["label"], "failing_rules": [{k: f[k] for k in ("element", "rule", "value")} for f in v["failing_rules"]]}
     if rng.random() < 0.15:  # simulate a model mistake
@@ -264,19 +375,29 @@ def generate(args):
     raw_f = open(OUT_DIR / f"{tag}_raw.jsonl", "a", encoding="utf-8")
     ok_f = open(OUT_DIR / f"{tag}_verified.jsonl", "a", encoding="utf-8")
     ifc_dir = ROOT / "data" / "synthetic" / tag
-    kept = 0
-    for i in range(args.n):
-        sc, c, target, user_prompt = make_user_prompt(rng)
-        t0 = time.time()
+    jobs = [make_user_prompt(rng, rules) for _ in range(args.n)]  # all prompts first: same seed, same prompts
+
+    def answers():
+        """(message, usage, seconds) per job, in job order; API calls run --workers at a time."""
         if args.dry_run:
-            msg, usage = fake_answer(sc, c, rng), None
-        else:
-            resp = call_model(client, user_prompt, args, prov["extra"])
-            if resp is None:
-                print(f"[{i + 1}/{args.n}] gave up after retries")
-                continue
-            msg = resp.choices[0].message
-            usage = resp.usage.model_dump() if getattr(resp, "usage", None) else None
+            for sc, _, target, _ in jobs:
+                yield fake_answer(sc, target, rng), None, 0.0
+            return
+
+        def ask(job):
+            t0 = time.time()
+            return call_model(client, job[3], args, prov["extra"]), time.time() - t0
+
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            for resp, secs in ex.map(ask, jobs):
+                usage = resp.usage.model_dump() if getattr(resp, "usage", None) else None
+                yield (resp.choices[0].message if resp else None), usage, secs
+
+    kept = 0
+    for i, ((sc, c, target, user_prompt), (msg, usage, secs)) in enumerate(zip(jobs, answers())):
+        if msg is None:
+            print(f"[{i + 1}/{args.n}] gave up after retries")
+            continue
         reasoning, json_text = split_answer(msg)
         try:
             building = json.loads(json_text)
@@ -288,7 +409,7 @@ def generate(args):
                "prompt_version": PROMPT_VERSION,
                "user_prompt": user_prompt, "target": target, "reasoning": reasoning, "answer_text": json_text,
                "building": building, "problems": problems, "kept": not problems,
-               "seconds": round(time.time() - t0, 1), "usage": usage}
+               "seconds": round(secs, 1), "usage": usage}
         if not problems:  # labels are written HERE, in the verify step, and stored with the record
             rec["labels"] = make_labels(building, rules)
         raw_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -339,6 +460,7 @@ if __name__ == "__main__":
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=1, help="API requests at the same time (default 1)")
     ap.add_argument("--write-ifc", action="store_true", help="write every verified building as an IFC file")
     ap.add_argument("--dry-run", action="store_true",
                     help="no API calls, fake answers, written to <role>_dryrun_* files (apart from the real data)")

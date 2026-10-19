@@ -26,7 +26,7 @@ pip install -r requirements.txt
 ## Check that everything works
 
 ```bash
-python -m pytest                    # 105 tests (GNN tests are skipped if torch is missing)
+python -m pytest                    # 113 tests (GNN tests are skipped if torch is missing)
 python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
 ```
 The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without

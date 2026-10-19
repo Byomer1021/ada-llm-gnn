@@ -10,8 +10,12 @@ ADA RULES (all values in millimetres)
 - Door clear width: >= 815 (ADA 404.2.3)
 - Door threshold height: <= 13 (ADA 404.2.5)
 - Door hardware height: 865 to 1220 (ADA 404.2.7)
-- Door maneuvering clearance (ADA 404.2.4), clear floor depth in front of the door,
-  measured perpendicular to it: pull side >= 1525, push side >= 1220
+- Door maneuvering clearance (ADA 404.2.4): the clear floor depth in front of the door
+  on each side, measured perpendicular to the door's wall, from the door to the opposite
+  wall of that space: pull side (the side the door swings toward) >= 1525, push side
+  >= 1220. A wheelchair user needs this space to pull or push the door open. It can
+  never be deeper than the room on that side (an empty room gives at most its full
+  depth); outside the entrance door it is at most 6000.
 - Room turning space diameter: >= 1525 (ADA 304.3.1); it can never be larger than
   the room's shorter side
 - Straight passage through a room: >= 915 wide (ADA 403.5.1)
@@ -38,7 +42,10 @@ DESIGN RULES
 - Use realistic values. Failing values must be plausible, not extreme
   (e.g. a narrow door is 650-800 mm, not 100 mm).
 - Only the values named in the scenario may fail; all others must comply.
-- Vary dimensions between buildings; do not reuse round numbers every time.
+- Follow the layout, the hardware types and the required values of the user message
+  exactly. Room sizes there are approximate; keep each side within about 10% of them.
+- Choose every other value yourself, anywhere in its realistic range: real buildings
+  do not all use the same round numbers.
 - Room sizes: 2500-6000 mm per side.
 - Rooms have no names or types, only ids (R1, R2, ...).
 

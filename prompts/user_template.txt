@@ -1,6 +1,10 @@
 Design a {n_rooms}-room building.
 Rooms: {rooms}
 Connections: {connections}
+Layout: {layout}
 Door placement: {placement}
+Approximate room sizes (width along x by length along y): {sizes}
+Door hardware type: {hardware}
 Target result: {label}
 Failure cause: {cause}
+Required values: {values}

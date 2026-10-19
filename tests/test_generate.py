@@ -1,19 +1,24 @@
-"""LLM generation: dry-run answers are verified against the target verdict."""
+"""LLM generation: prompts, dry-run answers and their verification against the target verdict."""
 import argparse
 import json
 import random
+from collections import Counter
 
 import src.llm.generate as gen
+from src.ada.rules import door_failures, room_failures
 from src.llm.generate import SCENARIOS, fake_answer, make_user_prompt, split_answer, validate
 from tests.test_rules import RULES
+
+COMPLIANT_DOOR = {"id": "D", "clear_width_mm": 900, "threshold_height_mm": 5, "hardware_height_mm": 1000,
+                  "maneuvering_pull_mm": 1600, "maneuvering_push_mm": 1300}
 
 
 def test_correct_answers_pass_and_wrong_label_fails():
     rng = random.Random(0)
     seen = set()
-    for _ in range(200):
-        sc, c, target, _ = make_user_prompt(rng)
-        _, text = split_answer(fake_answer(sc, c, rng))
+    for _ in range(300):
+        sc, c, target, _ = make_user_prompt(rng, RULES)
+        _, text = split_answer(fake_answer(sc, target, rng))
         b = json.loads(text)
         problems = validate(b, target, RULES)
         if b["intended_verdict"]["label"] == target["label"]:
@@ -26,17 +31,81 @@ def test_correct_answers_pass_and_wrong_label_fails():
 
 def test_wrong_building_is_rejected():
     rng = random.Random(1)
-    sc = next(s for s in SCENARIOS if s["id"] == "d2_width")
-    _, text = split_answer(fake_answer(sc, sc["causes"][0], rng))
-    b = json.loads(text)
+    sc, c, target, _ = make_user_prompt(rng, RULES)
+    while sc["id"] != "d2_width":
+        sc, c, target, _ = make_user_prompt(rng, RULES)
+    b = json.loads(split_answer(fake_answer(sc, target, rng))[1])
     b["doors"][1]["clear_width_mm"] = 900  # now everything passes, but the target says D2 fails
-    target = {"label": "not_accessible", "failing_rules": [{"element": "D2", "rule": "ADA 404.2.3"}]}
     assert any("rule engine" in p for p in validate(b, target, RULES))
 
 
+def test_required_values_fail_or_comply_as_asked():
+    """Checked with the rule engine itself, so the prompt values follow config/ada_rules.yaml."""
+    rng = random.Random(2)
+    gaps = {True: [], False: []}
+    for _ in range(500):
+        _, _, target, _ = make_user_prompt(rng, RULES)
+        for v in target["values"]:
+            if v["element"].startswith("D"):
+                fails = door_failures({**COMPLIANT_DOOR, v["field"]: v["value"]}, RULES)
+            else:
+                fails = room_failures({"id": v["element"], "turning_space_diameter_mm": v["value"]}, RULES)
+            assert bool(fails) == v["fails"], v
+            gaps[v["fails"]].append(abs(v["value"] - float(v["limit"].split()[1])))
+    assert all(g <= 30 for g in gaps[False])  # compliant values are close to the limit
+    near = sum(g <= 30 for g in gaps[True]) / len(gaps[True])
+    assert 0.35 < near < 0.65  # about half of the failing values are just past the limit
+
+
+def test_layouts_cover_every_orientation_and_follow_the_scenario():
+    rng = random.Random(3)
+    seen = Counter()
+    for _ in range(400):
+        sc, _, target, prompt = make_user_prompt(rng, RULES)
+        lay = target["layout"]
+        opposite = lay["D1"] == gen.OPPOSITE_WALL[lay["D2"]]
+        assert lay["D1"] != lay["D2"]
+        assert sc["placement"] != gen.OPP or opposite
+        assert sc["placement"] != gen.ADJ or not opposite
+        assert (gen.OPP if opposite else gen.ADJ) in prompt
+        seen["D1" + lay["D1"]] += 1
+        seen["D2" + lay["D2"]] += 1
+    assert all(seen[d + w] > 0 for d in ("D1", "D2") for w in "SNWE")
+
+
+def _two_rooms(d1_pull=5000, d2_pull=3000, d2_push=4000):
+    """R1 4000 x 3500 and R2 east of it (3000 x 3500). D1 on the south wall of R1 (depth 3500 inside,
+    6000 allowed outside); D2 on the shared wall (depth 4000 in R1, 3000 in R2)."""
+    door = lambda did, a, b, x, y, pull, push: {
+        "id": did, "connects": [a, b], "x_mm": x, "y_mm": y, "clear_width_mm": 900, "threshold_height_mm": 5,
+        "hardware_height_mm": 1000, "hardware_type": "Lever", "maneuvering_pull_mm": pull, "maneuvering_push_mm": push}
+    return {"rooms": [{"id": "R1", "x_mm": 0, "y_mm": 0, "width_mm": 4000, "length_mm": 3500,
+                       "turning_space_diameter_mm": 1600},
+                      {"id": "R2", "x_mm": 4000, "y_mm": 0, "width_mm": 3000, "length_mm": 3500,
+                       "turning_space_diameter_mm": 1600}],
+            "doors": [door("D1", "EXTERIOR", "R1", 2000, 0, d1_pull, 3000),
+                      door("D2", "R1", "R2", 4000, 1750, d2_pull, d2_push)],
+            "intended_verdict": {"label": "accessible", "failing_rules": []}}
+
+
+def test_maneuvering_clearance_must_fit_the_room():
+    target = {"label": "accessible", "failing_rules": [], "layout": {"D1": "S", "D2": "E"}}
+    # each clearance as deep as the room on its side: prompt v4 rejected two such buildings by mistake
+    assert validate(_two_rooms(), target, RULES) == []
+    deep = validate(_two_rooms(d2_push=4100), target, RULES)  # deeper than R1 (4000) and R2 (3000)
+    assert any("clearance of D2 is deeper than the room" in p for p in deep)
+    outside = validate(_two_rooms(d1_pull=6500), target, RULES)  # deeper than outside (6000) and R1
+    assert any("clearance of D1 is deeper than the room" in p for p in outside)
+
+
+def test_layout_of_the_prompt_must_be_followed():
+    target = {"label": "accessible", "failing_rules": [], "layout": {"D1": "W", "D2": "E"}}
+    assert "door D1 is not on the west wall of R1 as asked" in validate(_two_rooms(), target, RULES)
+
+
 def _dry_args(seed, n=3):
-    return argparse.Namespace(role="teacher", provider="nemotron", model=None, base_url=None, n=n,
-                              temperature=1.0, max_tokens=100, seed=seed, write_ifc=False, dry_run=True)
+    return argparse.Namespace(role="teacher", provider="nemotron", model=None, base_url=None, n=n, temperature=1.0,
+                              max_tokens=100, seed=seed, workers=1, write_ifc=False, dry_run=True)
 
 
 def test_seed_is_stored_and_reuse_warns(tmp_path, monkeypatch, capsys):
