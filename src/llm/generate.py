@@ -9,8 +9,6 @@ Each loop iteration:
   5. save every attempt to <role>_raw.jsonl, the correct ones to <role>_verified.jsonl
      together with their labels (verdict + targets of the three GNN agents),
      and (optional) write each verified building as an IFC file
-  6. (teacher only) the architecture council reviews the verified buildings:
-     scripts/council.py packet / collect -> teacher_approved.jsonl
 
 The same script runs the TEACHER (big model via API) and the STUDENT (fine-tuned
 Qwen 7B served locally with an OpenAI-compatible server such as vLLM), so all
@@ -25,6 +23,8 @@ Usage
   python -m src.llm.generate --role teacher --provider nemotron --n 20 --seed 2
   # several requests at the same time (answers are still saved in request order)
   python -m src.llm.generate --role teacher --provider nemotron --n 60 --seed 3 --workers 4 --write-ifc
+  # top up a scenario that came out rarely (scenarios are drawn uniformly by default)
+  python -m src.llm.generate --role teacher --provider nemotron --n 16 --seed 4 --scenario r1_small_turn --write-ifc
   # teacher, GPT-4.1 (no reasoning trace is returned by this API, only the answer)
   export OPENAI_API_KEY=sk-...
   python -m src.llm.generate --role teacher --provider openai --model gpt-4.1 --n 20
@@ -95,7 +95,11 @@ SCENARIOS = [
      "causes": [cause("entrance door D1 clear width is too narrow", "D1", "clear_width_mm", "ADA 404.2.3"),
                 cause("entrance door D1 threshold is too high", "D1", "threshold_height_mm", "ADA 404.2.5"),
                 cause("entrance door D1 has too little maneuvering clearance on the pull side", "D1",
-                      "maneuvering_pull_mm", "ADA 404.2.4")]},
+                      "maneuvering_pull_mm", "ADA 404.2.4"),
+                cause("entrance door D1 has too little maneuvering clearance on the push side", "D1",
+                      "maneuvering_push_mm", "ADA 404.2.4"),
+                cause("entrance door D1 hardware is mounted too high", "D1", "hardware_height_mm", "ADA 404.2.7", "high"),
+                cause("entrance door D1 hardware is mounted too low", "D1", "hardware_height_mm", "ADA 404.2.7", "low")]},
     {"id": "r1_small_turn", "label": NA, "placement": ADJ,
      "causes": [cause("room R1 turning space is too small and a turn is needed inside R1, so R2 cannot be reached",
                       "R1", "turning_space_diameter_mm", "ADA 304.3.1")]},
@@ -166,9 +170,10 @@ def make_layout(placement: str, rng: random.Random) -> dict:
     return {"D1": d1, "D2": d2}
 
 
-def make_user_prompt(rng: random.Random, R: dict | None = None):
+def make_user_prompt(rng: random.Random, R: dict | None = None, scenarios: list[str] | None = None):
+    """scenarios: ids to choose from (default: all, uniformly), e.g. to top up a rare scenario."""
     R = R or load_rules()
-    sc = rng.choice(SCENARIOS)
+    sc = rng.choice([s for s in SCENARIOS if not scenarios or s["id"] in scenarios])
     c = rng.choice(sc["causes"])
     lay = make_layout(sc["placement"], rng)
     sizes = {r: [rng.randrange(ROOM_SIDE_MM[0], ROOM_SIDE_MM[1] + 1, 50) for _ in range(2)] for r in ("R1", "R2")}
@@ -375,7 +380,7 @@ def generate(args):
     raw_f = open(OUT_DIR / f"{tag}_raw.jsonl", "a", encoding="utf-8")
     ok_f = open(OUT_DIR / f"{tag}_verified.jsonl", "a", encoding="utf-8")
     ifc_dir = ROOT / "data" / "synthetic" / tag
-    jobs = [make_user_prompt(rng, rules) for _ in range(args.n)]  # all prompts first: same seed, same prompts
+    jobs = [make_user_prompt(rng, rules, args.scenario) for _ in range(args.n)]  # all prompts first: same seed, same prompts
 
     def answers():
         """(message, usage, seconds) per job, in job order; API calls run --workers at a time."""
@@ -427,14 +432,10 @@ def generate(args):
 
 
 def export_sft(dry_run: bool = False):
-    """Council-approved teacher records -> chat-format training file for the student (Qwen).
-    Falls back to all verified teacher records if the council step has not been run yet.
+    """Verified teacher records -> chat-format training file for the student (Qwen).
     dry_run: use the fake teacher_dryrun_* records and write student_dryrun_sft.jsonl."""
     t, s = ("teacher_dryrun", "student_dryrun") if dry_run else ("teacher", "student")
-    src, dst = OUT_DIR / f"{t}_approved.jsonl", OUT_DIR / f"{s}_sft.jsonl"
-    if not src.exists():
-        src = OUT_DIR / f"{t}_verified.jsonl"
-        print(f"WARNING: {t}_approved.jsonl not found (run scripts/council.py collect); using every verified record")
+    src, dst = OUT_DIR / f"{t}_verified.jsonl", OUT_DIR / f"{s}_sft.jsonl"
     n = 0
     with open(src, encoding="utf-8") as f, open(dst, "w", encoding="utf-8") as g:
         for line in f:
@@ -461,6 +462,8 @@ if __name__ == "__main__":
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=1, help="API requests at the same time (default 1)")
+    ap.add_argument("--scenario", nargs="+", choices=[s["id"] for s in SCENARIOS], default=None,
+                    help="only these scenarios (default: all, uniformly), e.g. to top up a rare one")
     ap.add_argument("--write-ifc", action="store_true", help="write every verified building as an IFC file")
     ap.add_argument("--dry-run", action="store_true",
                     help="no API calls, fake answers, written to <role>_dryrun_* files (apart from the real data)")

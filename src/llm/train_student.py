@@ -1,6 +1,6 @@
 """
 Distillation, step 3: fine-tune the STUDENT (Qwen2.5-7B-Instruct) with LoRA on the teacher's
-council-approved answers (reasoning trace + building JSON).
+verified answers (reasoning trace + building JSON).
 
 Input:  data/llm/student_sft.jsonl   (python -m src.llm.generate --export-sft)
 Config: config/student.yaml (base model, LoRA, training); command-line flags override it.

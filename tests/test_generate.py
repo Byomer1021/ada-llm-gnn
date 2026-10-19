@@ -73,6 +73,15 @@ def test_layouts_cover_every_orientation_and_follow_the_scenario():
     assert all(seen[d + w] > 0 for d in ("D1", "D2") for w in "SNWE")
 
 
+def test_scenario_filter_and_every_door_value_can_fail_on_both_doors():
+    rng = random.Random(4)
+    prompts = [make_user_prompt(rng, RULES, ["d1_fails"]) for _ in range(300)]
+    assert {sc["id"] for sc, *_ in prompts} == {"d1_fails"}
+    d1_fields = {v["field"] for _, _, t, _ in prompts for v in t["values"] if v["fails"]}
+    d2_fields = {c["field"] for s in SCENARIOS if s["id"].startswith("d2_") for c in s["causes"]}
+    assert d1_fields == d2_fields == set(gen.DOOR_FIELDS)  # no "the entrance door never fails X" shortcut
+
+
 def _two_rooms(d1_pull=5000, d2_pull=3000, d2_push=4000):
     """R1 4000 x 3500 and R2 east of it (3000 x 3500). D1 on the south wall of R1 (depth 3500 inside,
     6000 allowed outside); D2 on the shared wall (depth 4000 in R1, 3000 in R2)."""
@@ -105,7 +114,7 @@ def test_layout_of_the_prompt_must_be_followed():
 
 def _dry_args(seed, n=3):
     return argparse.Namespace(role="teacher", provider="nemotron", model=None, base_url=None, n=n, temperature=1.0,
-                              max_tokens=100, seed=seed, workers=1, write_ifc=False, dry_run=True)
+                              max_tokens=100, seed=seed, workers=1, scenario=None, write_ifc=False, dry_run=True)
 
 
 def test_seed_is_stored_and_reuse_warns(tmp_path, monkeypatch, capsys):
@@ -133,4 +142,4 @@ def test_dry_run_stays_out_of_the_real_data(tmp_path, monkeypatch):
     assert all(r["model"] == "dry-run" and r["id"].startswith("teacher_dryrun_") for r in recs)
     # the dataset finds the fake records (and their IFC folder) only when asked for them by name
     assert {role for role, _ in dataset.records(["teacher_dryrun_verified"])} == {"teacher_dryrun"}
-    assert list(dataset.records(["teacher_approved", "teacher_verified", "student_verified"])) == []
+    assert list(dataset.records(["teacher_verified", "student_verified"])) == []

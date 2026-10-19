@@ -9,7 +9,8 @@ seed: 0
 
 # Tokens per example (system + user prompt + reasoning trace + JSON). Longer examples are
 # DROPPED, never cut: a cut answer would teach the student to stop inside the JSON.
-# Teacher v5 answers were 2.5k-8.2k tokens (Nemotron tokenizer) + about 1.4k prompt tokens.
+# Measured on the 231 teacher examples (Qwen tokenizer): mean 5530, max 12650 tokens,
+# 76% of them in the loss. Dropped: 10240 -> 3, 8192 -> 19, 6144 -> 64 (long reasoning first).
 max_length: 10240
 
 # 4-bit QLoRA: the 7B model fits a 16 GB GPU (T4). false = 16-bit weights (24 GB+ GPU).

@@ -80,6 +80,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--agents", choices=["gnn", "oracle"], default="gnn")
     ap.add_argument("--provider", choices=["auto", "local", "openai", "rule"], default=None)
-    ap.add_argument("--sources", nargs="+", default=["teacher_approved", "student_verified"])
+    ap.add_argument("--sources", nargs="+", default=["teacher_verified", "student_verified"])
     ap.add_argument("--limit", type=int, default=0)
     main(ap.parse_args())

@@ -1,5 +1,5 @@
 """
-Verified / approved LLM buildings -> graph dataset for the three GNN agents.
+Verified LLM buildings -> graph dataset for the three GNN agents.
 
 For every record the IFC file written by generate.py is READ BACK with the IFC reader
 (so the agents train on exactly what they will see on a real file), the graph is built,
@@ -7,9 +7,9 @@ and the targets are taken from the labels stored in the verify step (record["lab
 
 Split: by IFC file, 70 / 15 / 15, fixed seed (never by node or door).
 
-    python -m src.agents.dataset                                  # teacher_approved + student_verified
-    python -m src.agents.dataset --sources teacher_verified       # e.g. before the council step
-    python -m src.agents.dataset --sources teacher_dryrun_approved   # fake data of --dry-run (testing only)
+    python -m src.agents.dataset                                  # teacher_verified + student_verified
+    python -m src.agents.dataset --sources teacher_verified       # e.g. before the student exists
+    python -m src.agents.dataset --sources teacher_dryrun_verified   # fake data of --dry-run (testing only)
 Output: data/datasets/graphs.pt, data/datasets/split.json
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ def records(sources: list[str]):
         if not path.exists():
             print(f"skip {path.name} (not found)")
             continue
-        role = src.rsplit("_", 1)[0]  # IFC folder: teacher_approved -> teacher, teacher_dryrun_verified -> teacher_dryrun
+        role = src.rsplit("_", 1)[0]  # IFC folder: teacher_verified -> teacher, teacher_dryrun_verified -> teacher_dryrun
         with open(path, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
@@ -91,7 +91,7 @@ def main(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sources", nargs="+", default=["teacher_approved", "student_verified"],
+    ap.add_argument("--sources", nargs="+", default=["teacher_verified", "student_verified"],
                     help="record files in data/llm/ (without .jsonl)")
     ap.add_argument("--from-json", action="store_true", help="use the JSON building instead of reading the IFC")
     ap.add_argument("--seed", type=int, default=0)

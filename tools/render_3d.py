@@ -1,6 +1,6 @@
 """
-Render a cut-away 3D picture of an IFC building (for the architecture council
-survey, the web UI and slides). Failing doors are red, others green.
+Render a cut-away 3D picture of an IFC building (for the web UI, the report and
+slides). Failing doors are red, others green.
 
 Usage:
     python tools/render_3d.py data/demo/demo.ifc docs/figures/demo_3d.png
@@ -33,7 +33,7 @@ LIGHT = np.array([0.4, -0.7, 0.9]) / np.linalg.norm([0.4, -0.7, 0.9])
 def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
            failing: set[str] | None = None) -> str:
     """failing = ids of the doors to draw red. None -> ask the rule engine (only for the
-    council packet / slides; the web UI passes the main agent's failing elements)."""
+    report / slides; the web UI passes the main agent's failing elements)."""
     model = ifcopenshell.open(ifc_path)
     s = G.settings()
     s.set("use-world-coords", True)

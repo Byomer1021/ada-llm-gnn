@@ -7,7 +7,7 @@ Final test on the REAL IFC files (data/real/*.ifc, 150+, never used for training
 For every file: read it, run the check, write the report, and record whether it worked.
 Real files have no labels, so as a REFERENCE the rule engine is run on the same values
 (agreement = how often the check gives the same verdict). Ground truth for a sample of the
-files should be checked by hand / by the council (open question).
+files should be checked by hand (open question).
 
 Output: experiments/<time>_real/ : summary.csv, reports/<file>_report.md, summary.json
 """
