@@ -1,7 +1,12 @@
-# Only for fine-tuning the student (Qwen 7B, LoRA) on a GPU machine (Colab / lab PC).
-transformers
-peft
-trl
-datasets
-accelerate
-# vllm          # serve the fine-tuned student locally (Linux + GPU); Ollama also works
+# Only for fine-tuning the student (Qwen 7B, LoRA) on a GPU machine (Colab / lab PC):
+#   pip install -r requirements-student.txt      (torch with CUDA comes from the machine / Colab)
+# These versions ran src/llm/train_student.py end to end on CPU (tiny model, no 4-bit).
+transformers==5.20.2
+peft==0.21.2
+trl==1.16.0
+datasets==5.1.0
+accelerate==1.15.0
+pyyaml
+# 4-bit QLoRA (load_in_4bit in config/student.yaml); needs a CUDA GPU, not tested on this project yet
+bitsandbytes
+# vllm          # serve the base model + the LoRA adapter for student generation (Linux + GPU)

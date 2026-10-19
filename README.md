@@ -26,7 +26,7 @@ pip install -r requirements.txt
 ## Check that everything works
 
 ```bash
-python -m pytest                    # 113 tests (GNN tests are skipped if torch is missing)
+python -m pytest                    # 117 tests (GNN tests are skipped if torch is missing)
 python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
 ```
 The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without
@@ -56,8 +56,13 @@ python scripts/council.py collect data/council/filled/*.csv
 # council-approved teacher answers -> student training file
 python -m src.llm.generate --export-sft
 
-# student (fine-tuned Qwen 7B served locally, e.g. with vLLM on port 8000)
-python -m src.llm.generate --role student --provider local --model qwen-ada --n 2000 --write-ifc
+# student: LoRA fine-tuning of Qwen 7B on a GPU (Colab / lab PC); settings in config/student.yaml
+pip install -r requirements-student.txt
+python -m src.llm.train_student                      # -> models/student/<time>/adapter, experiments/<time>_student/
+# serve the base model + the adapter with vLLM (no merge needed), then generate with the student
+vllm serve Qwen/Qwen2.5-7B-Instruct --enable-lora --max-lora-rank 16 \
+    --lora-modules qwen-ada=models/student/<time>/adapter --port 8000
+python -m src.llm.generate --role student --provider local --model qwen-ada --n 2000 --workers 8 --write-ifc
 ```
 Results: `data/llm/*.jsonl` (every attempt, verified ones with labels, approved ones),
 IFC files in `data/synthetic/<role>/`.

@@ -442,7 +442,7 @@ def export_sft(dry_run: bool = False):
             answer = json.dumps(r["building"], ensure_ascii=False)
             if r.get("reasoning"):
                 answer = f"<think>\n{r['reasoning']}\n</think>\n" + answer
-            g.write(json.dumps({"messages": [
+            g.write(json.dumps({"id": r["id"], "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": r["user_prompt"]},
                 {"role": "assistant", "content": answer}]}, ensure_ascii=False) + "\n")
