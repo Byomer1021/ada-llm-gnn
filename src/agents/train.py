@@ -30,7 +30,7 @@ from torch_geometric.loader import DataLoader
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.agents.models import AGENTS, CONVS, build_agent, targets  # noqa: E402
+from src.agents.models import AGENTS, CONVS, MODEL_VERSION, build_agent, targets  # noqa: E402
 from src.ada.graph_builder import FEATURE_VERSION  # noqa: E402
 from src.ada.rules import DOOR_RULES  # noqa: E402
 
@@ -96,7 +96,8 @@ def train_one(agent, conv, seed, sets, args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     model = build_agent(agent, conv, args.hidden, args.layers)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    model.norm.fit(sets["train"])  # statistics of the training split only
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     pw = pos_weight(agent, sets["train"])
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw if agent == "door" else pw.squeeze())
     best, best_state, bad = -1.0, None, 0
@@ -143,7 +144,7 @@ def main(args):
                    "std": float(np.std([r["test"][k] for r in runs]))} for k in keys}
     print("  test (mean +- std): " + ", ".join(f"{k} {v['mean']:.3f}+-{v['std']:.3f}" for k, v in summary.items()))
     cfg = {"agent": args.agent, "conv": args.conv, "hidden": args.hidden, "feature_version": FEATURE_VERSION,
-           "layers": args.layers or (2 if args.agent == "door" else 4)}
+           "model_version": MODEL_VERSION, "layers": args.layers or (2 if args.agent == "door" else 4)}
     out = ROOT / "experiments" / f"{time.strftime('%Y%m%d_%H%M%S')}_{args.agent}_{args.conv}"
     out.mkdir(parents=True, exist_ok=True)
     (out / "metrics.json").write_text(json.dumps({"config": cfg | vars(args), "runs": runs, "summary": summary},
@@ -162,6 +163,7 @@ if __name__ == "__main__":
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--layers", type=int, default=None, help="default: door 2, room/route 4")
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--weight-decay", type=float, default=1e-5)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--patience", type=int, default=40)

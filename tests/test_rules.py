@@ -39,8 +39,10 @@ SCENARIOS = [
     ("R1 small, straight (D1 west, D2 east)", two_rooms(d1_xy=(0, 2400), r1={"turning_space_diameter_mm": 1300}),
      {"R1": R, "R2": R}),
     ("R2 small", two_rooms(r2={"turning_space_diameter_mm": 1300}), {"R1": R, "R2": R}),
-    ("D2 value missing -> conservative", two_rooms(d2={"clear_width_mm": None}), {"R1": R, "R2": NR}),
+    ("D2 value missing -> not checked", two_rooms(d2={"clear_width_mm": None}), {"R1": R, "R2": R}),
 ]
+FAIL_POLICY = copy.deepcopy(RULES)
+FAIL_POLICY["missing_values"]["policy"] = "fail"
 
 
 @pytest.mark.parametrize("name,building,expected", SCENARIOS, ids=[s[0] for s in SCENARIOS])
@@ -101,9 +103,23 @@ VERDICTS = [  # (scenario name, label, failing (element, rule) pairs)
     ("R1 small, turn needed (D1 south, D2 east)", NA, {("R1", "ADA 304.3.1")}),
     ("R1 small, straight (D1 west, D2 east)", A, set()),
     ("R2 small", A, set()),
-    ("D2 value missing -> conservative", NA, {("D2", "ADA 404.2.3")}),
+    ("D2 value missing -> not checked", A, set()),
 ]
 BUILDINGS = {name: b for name, b, _ in SCENARIOS}
+
+
+def test_missing_value_policies():
+    """Default "not_checked": the rule is reported apart, nothing fails. "fail": conservative (E4)."""
+    b = BUILDINGS["D2 value missing -> not checked"]
+    v = evaluate(b, RULES)["verdict"]
+    assert v["label"] == A and v["failing_rules"] == [] and v["warnings"] == []
+    assert v["not_checked"] == [{"element": "D2", "rule": "ADA 404.2.3", "field": "clear_width_mm"}]
+    res = evaluate(b, FAIL_POLICY)
+    assert res["labels"]["R2"] == NR and res["verdict"]["not_checked"] == []
+    assert {(f["element"], f["rule"]) for f in res["verdict"]["failing_rules"]} == {("D2", "ADA 404.2.3")}
+    small = two_rooms(r1={"turning_space_diameter_mm": None})  # R1 crossed with a turn: unknown -> may pass
+    assert evaluate(small, RULES)["labels"]["R2"] == R
+    assert evaluate(small, FAIL_POLICY)["labels"]["R2"] == NR
 
 
 @pytest.mark.parametrize("name,label,failing", VERDICTS, ids=[v[0] for v in VERDICTS])
@@ -116,6 +132,22 @@ def test_building_verdict(name, label, failing):
 def test_non_blocking_failure_is_a_warning():
     v = evaluate(two_rooms(r2={"turning_space_diameter_mm": 1300}), RULES)["verdict"]
     assert v["label"] == A and any("R2" in w for w in v["warnings"])
+
+
+def test_unreachable_room_without_a_failing_rule_is_not_accessible():
+    """Found on real files: no entrance door / a room without doors used to give "accessible"."""
+    no_entrance = two_rooms()
+    no_entrance["doors"] = no_entrance["doors"][1:]  # only D2 (R1 - R2) is left
+    res = evaluate(no_entrance, RULES)
+    assert res["verdict"]["label"] == NA and res["verdict"]["failing_rules"] == []
+    assert res["verdict"]["unreachable_rooms"] == ["R1", "R2"]
+    assert "no entrance door found" in res["reasons"]["R1"][0]
+    no_doors = {"rooms": two_rooms()["rooms"], "doors": []}
+    assert evaluate(no_doors, RULES)["verdict"]["label"] == NA
+    lonely = two_rooms()
+    lonely["doors"] = lonely["doors"][:1]  # R2 has no door at all
+    v = evaluate(lonely, RULES)["verdict"]
+    assert v["label"] == NA and v["unreachable_rooms"] == ["R2"]
 
 
 def test_warnings_can_be_made_to_count():

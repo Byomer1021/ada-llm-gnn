@@ -5,13 +5,18 @@ FINDINGS FORMAT (input of the main agent, also shown in the report)
 {
   "source": "gnn" | "oracle",
   "doors": [{"id": "D2", "connects": ["R1", "R2"], "values": {...mm...},
-             "fail_prob": {"ADA 404.2.3": 0.97, "ADA 404.2.5": 0.01, "ADA 404.2.7": 0.02, "ADA 404.2.4": 0.03}}],
-  "rooms": [{"id": "R2", "values": {...mm...}, "turning_fail_prob": 0.02, "reachable_prob": 0.04}],
+             "fail_prob": {"ADA 404.2.3": 0.97, "ADA 404.2.5": 0.01, "ADA 404.2.7": None, "ADA 404.2.4": 0.03},
+             "not_checked": ["ADA 404.2.7"], "estimated": {"clear_width_mm": "OverallWidth ..."}}],
+  "rooms": [{"id": "R2", "values": {...mm...}, "turning_fail_prob": 0.02, "reachable_prob": 0.04,
+             "not_checked": [], "estimated": {}}],
   "data_issues": ["..."]          # from the IFC reader
 }
 - door agent  -> doors[].fail_prob
 - room agent  -> rooms[].turning_fail_prob
 - route agent -> rooms[].reachable_prob
+A rule whose value is not in the file (and could not be estimated) gets probability None and is
+listed in not_checked (config/ada_rules.yaml: missing_values.policy "not_checked"); there is
+nothing to predict it from. "estimated": values the IFC reader estimated (config/derive.yaml).
 
 `oracle_findings()` builds the same format from the rule engine (probabilities 0 / 1).
 It is ONLY for testing the main agent and the UI before the GNNs are trained, and as an
@@ -26,16 +31,26 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.ada.graph_builder import EDGE_FEATURES, FEATURE_VERSION, NODE_FEATURES, build_graph, to_pyg  # noqa: E402
-from src.ada.rules import DOOR_RULES, EXTERIOR, evaluate, load_rules  # noqa: E402
+from src.ada.rules import (DOOR_FIELD_RULE, DOOR_RULES, EXTERIOR, ROOM_FIELD, ROOM_RULE, evaluate,  # noqa: E402
+                           load_rules)
 
 AGENT_NAMES = ["door", "room", "route"]
+
+
+def _unchecked(el: dict, rules: dict) -> list[str]:
+    """Rules of a door / room whose value is missing, when such rules count as "not checked"."""
+    if rules["missing_values"]["policy"] == "fail":
+        return []
+    if "connects" in el:
+        return [r for r in DOOR_RULES if any(el.get(k) is None for k, rr in DOOR_FIELD_RULE.items() if rr == r)]
+    return [ROOM_RULE] if el.get(ROOM_FIELD) is None else []
 
 
 def load_agents(models_dir: str | Path = ROOT / "models") -> dict:
     """Load models/door.pt, room.pt, route.pt (written by src.agents.train)."""
     import torch
 
-    from src.agents.models import build_agent
+    from src.agents.models import MODEL_VERSION, build_agent
 
     models_dir = Path(models_dir)
     missing = [a for a in AGENT_NAMES if not (models_dir / f"{a}.pt").exists()]
@@ -49,6 +64,9 @@ def load_agents(models_dir: str | Path = ROOT / "models") -> dict:
         if c.get("feature_version") != FEATURE_VERSION:
             raise RuntimeError(f"{a}.pt was trained with feature version {c.get('feature_version')}, the code uses "
                                f"{FEATURE_VERSION}. Rebuild the dataset and retrain the agent.")
+        if c.get("model_version", 1) != MODEL_VERSION:
+            raise RuntimeError(f"{a}.pt is model version {c.get('model_version', 1)}, the code uses {MODEL_VERSION}. "
+                               f"Retrain the agent (python -m src.agents.train --agent {a}).")
         m = build_agent(a, c["conv"], c["hidden"], c["layers"])
         m.load_state_dict(ck["state_dict"])
         m.eval()
@@ -60,10 +78,25 @@ def _values(obj: dict, keys: list[str]) -> dict:
     return {k: obj.get(k) for k in keys}
 
 
-def run_agents(building: dict, agents: dict) -> dict:
+def _door(d: dict, probs: dict, rules: dict) -> dict:
+    nc = _unchecked(d, rules)
+    return {"id": d["id"], "connects": d["connects"], "values": _values(d, EDGE_FEATURES),
+            "fail_prob": {r: None if r in nc else round(p, 3) for r, p in probs.items()},
+            "not_checked": nc, "estimated": d.get("estimated", {})}
+
+
+def _room(r: dict, turn_p: float, reach_p: float, rules: dict) -> dict:
+    nc = _unchecked(r, rules)
+    return {"id": r["id"], "values": _values(r, NODE_FEATURES),
+            "turning_fail_prob": None if nc else round(turn_p, 3), "reachable_prob": round(reach_p, 3),
+            "not_checked": nc, "estimated": r.get("estimated", {})}
+
+
+def run_agents(building: dict, agents: dict, rules: dict | None = None) -> dict:
     """Three GNN agents (in parallel, independent of each other) -> findings."""
     import torch
 
+    rules = rules or load_rules()
     g = build_graph(building)  # no labels at check time
     data = to_pyg(g)
     with torch.no_grad():
@@ -72,11 +105,8 @@ def run_agents(building: dict, agents: dict) -> dict:
         reach_p = torch.sigmoid(agents["route"](data)).tolist()
     doors_by_id = {d["id"]: d for d in building["doors"]}
     rooms_by_id = {r["id"]: r for r in building["rooms"]}
-    doors = [{"id": did, "connects": doors_by_id[did]["connects"], "values": _values(doors_by_id[did], EDGE_FEATURES),
-              "fail_prob": {r: round(p, 3) for r, p in zip(DOOR_RULES, door_p[i])}}
-             for i, did in enumerate(data.door_ids)]
-    rooms = [{"id": n, "values": _values(rooms_by_id[n], NODE_FEATURES),
-              "turning_fail_prob": round(turn_p[i], 3), "reachable_prob": round(reach_p[i], 3)}
+    doors = [_door(doors_by_id[did], dict(zip(DOOR_RULES, door_p[i])), rules) for i, did in enumerate(data.door_ids)]
+    rooms = [_room(rooms_by_id[n], turn_p[i], reach_p[i], rules)
              for i, n in enumerate(data.node_names) if n != EXTERIOR]
     return {"source": "gnn", "doors": doors, "rooms": rooms, "data_issues": building.get("issues", [])}
 
@@ -85,10 +115,8 @@ def oracle_findings(building: dict, rules: dict | None = None) -> dict:
     """Same format from the rule engine. Testing / upper bound only - NOT the method."""
     rules = rules or load_rules()
     res = evaluate(building, rules)
-    doors = [{"id": d["id"], "connects": d["connects"], "values": _values(d, EDGE_FEATURES),
-              "fail_prob": {r: float(any(f["rule"] == r for f in res["door_failures"][d["id"]])) for r in DOOR_RULES}}
+    doors = [_door(d, {r: float(any(f["rule"] == r for f in res["door_failures"][d["id"]])) for r in DOOR_RULES}, rules)
              for d in building["doors"]]
-    rooms = [{"id": r["id"], "values": _values(r, NODE_FEATURES),
-              "turning_fail_prob": float(bool(res["room_failures"][r["id"]])),
-              "reachable_prob": float(res["labels"][r["id"]] == "reachable")} for r in building["rooms"]]
+    rooms = [_room(r, float(bool(res["room_failures"][r["id"]])), float(res["labels"][r["id"]] == "reachable"), rules)
+             for r in building["rooms"]]
     return {"source": "oracle", "doors": doors, "rooms": rooms, "data_issues": building.get("issues", [])}

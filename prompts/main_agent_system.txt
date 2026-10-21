@@ -14,7 +14,10 @@ You receive their findings as JSON:
 - rooms[].reachable_prob: route agent, probability that a wheelchair user can get
     from the entrance to that room (it knows on which walls the doors are; crossing a
     room that cannot turn around is only possible in a straight line, ADA 403.5.1)
-- values: the raw measurements read from the IFC file (mm; null = missing)
+- values: the measurements read from the IFC file (mm; null = not in the file)
+- estimated: values the file did not carry and that were estimated from its geometry
+    or standard IFC data (e.g. clear width from the door's overall width); approximate
+- not_checked: rules whose value is not in the file; their probability is null
 - data_issues: problems found while reading the IFC file
 
 YOUR JOB: give the final verdict for the whole building.
@@ -32,7 +35,9 @@ HOW TO COMBINE THE AGENTS
   way fails, or a door on the only path fails but the room behind it is predicted
   reachable), check the raw values against the rules above, decide, and mention the
   disagreement in "explanation".
-- A missing value (null) counts as failing (conservative).
+- A null probability means the rule could not be checked (value not in the file). It
+  does NOT count as failing and never goes into "failing_rules"; the system reports it
+  separately. If a decision rests on estimated values, say so in "explanation".
 - Do not invent elements or rules that are not in the input.
 
 OUTPUT: ONLY this JSON, nothing before or after it.

@@ -29,9 +29,17 @@ FIELD_OF = {"ADA 404.2.3": ["clear_width_mm"], "ADA 404.2.5": ["threshold_height
 def _value(findings: dict, element: str, rule: str) -> str:
     for e in findings["doors"] + findings["rooms"]:
         if e["id"] == element:
-            vals = [(k.replace("_mm", ""), e["values"].get(k)) for k in FIELD_OF.get(rule, []) if k in e["values"]]
-            return ", ".join(f"{k} {'missing' if v is None else f'{v:g}'}" for k, v in vals)
+            est = e.get("estimated", {})
+            vals = [(k, e["values"].get(k)) for k in FIELD_OF.get(rule, []) if k in e["values"]]
+            return ", ".join(f"{k.replace('_mm', '')} {'not in the file' if v is None else f'{v:g}'}"
+                             f"{' (estimated)' if k in est else ''}" for k, v in vals)
     return ""
+
+
+def _door_result(d: dict) -> str:
+    bad = [r for r, p in d["fail_prob"].items() if p is not None and p >= 0.5]
+    out = "fails " + ", ".join(bad) if bad else "passes"
+    return out + (f" (not checked: {', '.join(d['not_checked'])})" if d.get("not_checked") else "")
 
 
 def make_report(building: dict, decision: dict, findings: dict, title: str | None = None) -> str:
@@ -49,15 +57,27 @@ def make_report(building: dict, decision: dict, findings: dict, title: str | Non
         lines.append("")
     if decision.get("warnings"):
         lines += ["## Warnings", ""] + [f"- {w}" for w in decision["warnings"]] + [""]
+    if decision.get("not_checked"):
+        by_rule: dict[str, list[str]] = {}
+        for nc in decision["not_checked"]:
+            by_rule.setdefault(nc["rule"], []).append(nc["element"])
+        lines += ["## Not checked (value not in the IFC file)", "",
+                  "The result above holds for the rules that could be checked. These could not:", ""]
+        lines += [f"- {rule} ({_limit(rule)}): {', '.join(els)}" for rule, els in by_rule.items()] + [""]
+    est = [(e["id"], k, e["values"].get(k), how) for e in findings["doors"] + findings["rooms"]
+           for k, how in e.get("estimated", {}).items()]
+    if est:
+        lines += ["## Estimated values (not in the file, estimated from its geometry / IFC data)", "",
+                  "| Element | Value | mm | How |", "|---|---|---|---|"]
+        lines += [f"| {el} | {k.replace('_mm', '')} | {v:g} | {how} |" for el, k, v, how in est] + [""]
     lines += ["## What the agents found", "",
               "| Element | Agent | Result |", "|---|---|---|"]
     for d in findings["doors"]:
-        bad = [r for r, p in d["fail_prob"].items() if p >= 0.5]
-        lines.append(f"| {d['id']} ({' - '.join(d['connects'])}) | door | "
-                     f"{'fails ' + ', '.join(bad) if bad else 'passes'} |")
+        lines.append(f"| {d['id']} ({' - '.join(d['connects'])}) | door | {_door_result(d)} |")
     for r in findings["rooms"]:
-        lines.append(f"| {r['id']} | room | turning space {'fails' if r['turning_fail_prob'] >= 0.5 else 'ok'} "
-                     f"(p = {r['turning_fail_prob']:.2f}) |")
+        tp = r["turning_fail_prob"]
+        lines.append(f"| {r['id']} | room | " + ("turning space not checked" if tp is None else
+                     f"turning space {'fails' if tp >= 0.5 else 'ok'} (p = {tp:.2f})") + " |")
         lines.append(f"| {r['id']} | route | {'reachable' if r['reachable_prob'] >= 0.5 else 'not reachable'} "
                      f"(p = {r['reachable_prob']:.2f}) |")
     if findings.get("data_issues"):

@@ -12,7 +12,10 @@ Two options (config/pipeline.yaml, main_agent):
 
 DECISION FORMAT
 {"label": "accessible" | "not_accessible", "failing_rules": [{"element": "D2", "rule": "ADA 404.2.3"}],
- "warnings": [...], "explanation": "...", "provider": "local:qwen2.5:7b" | "openai:gpt-4.1-mini" | "rule"}
+ "warnings": [...], "explanation": "...", "provider": "local:qwen2.5:7b" | "openai:gpt-4.1-mini" | "rule",
+ "not_checked": [{"element": "D1", "rule": "ADA 404.2.7"}]}
+"not_checked" (value not in the file) is copied from the findings, not decided by the LLM:
+it is a fact about the input, not a judgement.
 """
 from __future__ import annotations
 
@@ -44,8 +47,10 @@ def rule_decide(findings: dict, thr: float = 0.5) -> dict:
     """Fixed combination: reachability from the route agent, causes from the door / room agents."""
     rooms = {r["id"]: r for r in findings["rooms"]}
     reach = {rid: r["reachable_prob"] >= thr for rid, r in rooms.items()} | {EXTERIOR: True}
-    door_fails = {d["id"]: [r for r, p in d["fail_prob"].items() if p >= thr] for d in findings["doors"]}
-    turn_fails = {rid for rid, r in rooms.items() if r["turning_fail_prob"] >= thr}
+    # None = rule not checked (value not in the file): never counts as failing
+    door_fails = {d["id"]: [r for r, p in d["fail_prob"].items() if p is not None and p >= thr]
+                  for d in findings["doors"]}
+    turn_fails = {rid for rid, r in rooms.items() if (r["turning_fail_prob"] or 0) >= thr}
     failing, blamed = [], set()
     for d in findings["doors"]:
         a, b = d["connects"]
@@ -113,8 +118,19 @@ def llm_decide(findings: dict, opt: dict, cfg: dict, client=None, tries: int = 2
     raise ValueError(f"invalid answer after {tries} tries: {last}")
 
 
+def not_checked(findings: dict) -> list[dict]:
+    return [{"element": e["id"], "rule": r} for e in findings["doors"] + findings["rooms"]
+            for r in e.get("not_checked", [])]
+
+
 def decide(findings: dict, provider: str | None = None, cfg: dict | None = None, clients: dict | None = None) -> dict:
     """clients: optional {"local": client, "openai": client} (tests inject fakes here)."""
+    d = _decide(findings, provider, cfg, clients)
+    d["not_checked"] = not_checked(findings)
+    return d
+
+
+def _decide(findings: dict, provider: str | None, cfg: dict | None, clients: dict | None) -> dict:
     cfg = cfg or load_config()
     m = cfg["main_agent"]
     provider = provider or m["provider"]

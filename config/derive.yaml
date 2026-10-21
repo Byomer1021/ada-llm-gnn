@@ -1,0 +1,32 @@
+# How the IFC reader ESTIMATES the ADA values a file does not carry as properties.
+# Real exports (ArchiCAD, Revit, SketchUp) have no ADA_Accessibility property set; checked
+# on 3 public files (20.10.2026): door width is there as IfcDoor.OverallWidth, the rest is not.
+# A property in the file always wins (our synthetic files have all of them). Estimated values
+# are marked in the report. What cannot be estimated stays unknown, and its rule is reported
+# as "not checked" (config/ada_rules.yaml: missing_values.policy).
+enabled: true
+
+door:
+  # clear width = (OverallWidth - 2 * lining) * widest leaf share - open leaf thickness
+  #   OverallWidth  IfcDoor attribute: the opening including the lining (frame)
+  #   lining        IfcDoorLiningProperties.LiningThickness, else lining_thickness_mm
+  #   leaf share    IfcDoorPanelProperties.PanelWidth (0..1, widest panel), else 1 / leaves
+  #                 (2 leaves for DOUBLE_* operation types). ADA 404.2.3: one leaf must give it.
+  #   open leaf     a swing leaf opened to 90 degrees stands in the opening with its thickness
+  #                 (PanelDepth, else leaf_thickness_mm); sliding / folding leaves: 0
+  lining_thickness_mm: 50
+  leaf_thickness_mm: 40
+  # threshold: IfcDoorLiningProperties.ThresholdThickness when it is set, else unknown.
+  # hardware height: no standard IFC field -> always unknown in real files.
+
+room:
+  # turning space = shorter side of the room's footprint (bounding box) of an EMPTY room.
+  # An upper bound: furniture and irregular (L-shaped) rooms make the real circle smaller.
+  turning_from_short_side: true
+
+maneuvering:
+  # clear floor depth on each side of a door = depth of that room perpendicular to the door's
+  # wall (empty room); outside the entrance door: exterior_depth_mm.
+  # The files do not say from which side a door is pulled, so the PULL side (needs more,
+  # ADA 404.2.4) gets the SHALLOWER of the two depths (conservative).
+  exterior_depth_mm: 6000

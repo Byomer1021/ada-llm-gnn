@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ## Check that everything works
 
 ```bash
-python -m pytest                    # 118 tests (GNN tests are skipped if torch is missing)
+python -m pytest                    # 129 tests (GNN tests are skipped if torch is missing)
 python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
 ```
 The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without
@@ -83,6 +83,8 @@ Choose in `config/pipeline.yaml` (`provider: auto | local | openai | rule`).
 python -m src.pipeline some.ifc                      # one file -> report
 python scripts/evaluate.py --provider rule           # test split; also: local / openai / auto, --agents oracle
 python scripts/test_real_ifc.py                      # the real IFC files in data/real/ (final test)
+# real files carry no ADA properties: the reader estimates what their geometry / standard IFC data
+# allows (config/derive.yaml, marked in the report); the rest is reported as "not checked"
 streamlit run app/streamlit_app.py                   # web UI: upload an IFC
 ```
 

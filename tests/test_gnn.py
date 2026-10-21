@@ -50,6 +50,19 @@ def test_tiny_training_lowers_loss():
     assert loss.item() < first
 
 
+def test_input_norm_standardises_values_only():
+    graphs = [data_of(b) for name, b, _ in SCENARIOS if "missing" not in name]
+    model = build_agent("door")
+    model.norm.fit(graphs)
+    x, e, d = model.norm(graphs[0])
+    allx = torch.cat([model.norm(g)[0] for g in graphs])
+    rooms = torch.cat([g.x[:, -1] == 0 for g in graphs])
+    assert abs(float(allx[rooms, 0].mean())) < 1e-4  # room width standardised over the training rooms
+    assert torch.equal(x[:, 3:], graphs[0].x[:, 3:])  # missing flags and is_exterior unchanged
+    assert torch.equal(e[:, 5:], graphs[0].edge_attr[:, 5:])  # door flags and wall one-hots unchanged
+    assert "norm.x_mean" in model.state_dict()  # saved with the checkpoint
+
+
 def test_run_agents_output_format():
     agents = {a: build_agent(a).eval() for a in ("door", "room", "route")}
     f = run_agents(SCENARIOS[1][1], agents)

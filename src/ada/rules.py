@@ -31,8 +31,11 @@ RULES (decisions of the project)
    exit doors are on opposite walls and the room is at least 915 mm wide across
    the direction of travel (ADA 403.5.1). Otherwise it blocks the rooms behind it.
 5. If a door's wall cannot be determined, assume a turn is needed (conservative).
-6. Missing values -> the element fails (policy "fail" in config), so the engine
-   never says "reachable" by mistake.
+6. Missing values (config `missing_values.policy`):
+   "not_checked" (default): a value that is not in the file (and could not be estimated
+   by the IFC reader) does not fail its rule; the rule is listed as NOT CHECKED for that
+   element, apart from the failing rules and the warnings.
+   "fail": the element fails (conservative; compared in the missing-data experiment E4).
 7. BUILDING VERDICT: "accessible" if every room is reachable from the entrance,
    otherwise "not_accessible". The failing rules are the ones that block a room.
    Failures that block nothing (e.g. the last room cannot turn around) are
@@ -50,6 +53,10 @@ REACHABLE, NOT_REACHABLE = "reachable", "not_reachable"          # room level (i
 ACCESSIBLE, NOT_ACCESSIBLE = "accessible", "not_accessible"      # building level (the output)
 DOOR_RULES = ["ADA 404.2.3", "ADA 404.2.5", "ADA 404.2.7", "ADA 404.2.4"]  # door agent outputs
 ROOM_RULE = "ADA 304.3.1"                                                  # room agent output
+DOOR_FIELD_RULE = {"clear_width_mm": "ADA 404.2.3", "threshold_height_mm": "ADA 404.2.5",
+                   "hardware_height_mm": "ADA 404.2.7", "maneuvering_pull_mm": "ADA 404.2.4",
+                   "maneuvering_push_mm": "ADA 404.2.4"}
+ROOM_FIELD = "turning_space_diameter_mm"
 OPPOSITE = {("S", "N"), ("N", "S"), ("W", "E"), ("E", "W")}
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "ada_rules.yaml"
@@ -118,6 +125,26 @@ def door_side(door: dict, room: dict, R: dict) -> str | None:
         cand += [("W", abs(x - x0)), ("E", abs(x - x1))]
     cand = [c for c in cand if c[1] <= tol]
     return min(cand, key=lambda c: c[1])[0] if cand else None
+
+
+def room_depth(door: dict, room: dict, R: dict) -> float | None:
+    """Depth of the room perpendicular to the door's wall (None if the wall is unknown)."""
+    wall = door_side(door, room, R)
+    if wall is None:
+        return None
+    v = room.get("length_mm") if wall in ("S", "N") else room.get("width_mm")
+    return float(v) if v is not None else None
+
+
+def not_checked(building: dict, R: dict) -> list[dict]:
+    """Rules that could not be checked because their value is missing (policy "not_checked")."""
+    if R["missing_values"]["policy"] == "fail":
+        return []
+    out = [{"element": d["id"], "rule": rule, "field": k}
+           for d in building["doors"] for k, rule in DOOR_FIELD_RULE.items() if d.get(k) is None]
+    out += [{"element": r["id"], "rule": ROOM_RULE, "field": ROOM_FIELD}
+            for r in building["rooms"] if r.get(ROOM_FIELD) is None]
+    return out
 
 
 def can_pass(room: dict, door_in: dict, door_out: dict, R: dict) -> tuple[bool, dict | None]:
@@ -210,10 +237,12 @@ def evaluate(building: dict, R: dict | None = None) -> dict:
         else:
             causes[rid] = _unique(blocked[rid])
             reasons[rid] = [c["text"] for c in causes[rid]] or \
-                ["no accessible path from the entrance (all neighbouring rooms are unreachable)"]
+                ["no entrance door found (no door connects a room to EXTERIOR)" if not by_room[EXTERIOR] else
+                 "no accessible path from the entrance (all neighbouring rooms are unreachable)"]
     result = {"labels": labels, "reasons": reasons, "causes": causes, "warnings": warnings,
               "door_failures": dfail, "room_failures": rfail}
     result["verdict"] = building_verdict(result, R)
+    result["verdict"]["not_checked"] = not_checked(building, R)
     return result
 
 
@@ -238,7 +267,9 @@ def building_verdict(result: dict, R: dict) -> dict:
     other = _unique(other)
     if R.get("verdict", {}).get("warnings_make_not_accessible") and other:
         failing, other = _unique(failing + other), []
-    return {"label": NOT_ACCESSIBLE if failing else ACCESSIBLE,
+    # every room must be reachable: an unreachable room makes the building not accessible even
+    # when no ADA rule is to blame (no entrance door, a room without doors)
+    return {"label": NOT_ACCESSIBLE if unreachable or failing else ACCESSIBLE,
             "failing_rules": [{k: f[k] for k in ("element", "rule", "field", "value", "limit", "text")}
                               for f in failing],
             "warnings": [f["text"] for f in other],

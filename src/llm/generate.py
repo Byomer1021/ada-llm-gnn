@@ -50,7 +50,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from src.ada.rules import ACCESSIBLE, EXTERIOR, NOT_ACCESSIBLE, door_side, evaluate, load_rules, make_labels  # noqa: E402
+from src.ada.rules import (ACCESSIBLE, EXTERIOR, NOT_ACCESSIBLE, door_side, evaluate, load_rules,  # noqa: E402
+                           make_labels, room_depth)
 
 OUT_DIR = ROOT / "data" / "llm"
 SYSTEM_PROMPT = (ROOT / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
@@ -211,13 +212,7 @@ EXTERIOR_DEPTH_MM = 6000  # free depth assumed outside the entrance door
 def side_depth(door: dict, side: str, rooms: dict, R: dict) -> float | None:
     """Free floor depth on one side of a door: the depth of that room perpendicular to the door's wall
     (None if the door is not on a wall of the room)."""
-    if side == EXTERIOR:
-        return EXTERIOR_DEPTH_MM
-    room = rooms[side]
-    wall = door_side(door, room, R)
-    if wall is None:
-        return None
-    return room["length_mm"] if wall in ("S", "N") else room["width_mm"]
+    return EXTERIOR_DEPTH_MM if side == EXTERIOR else room_depth(door, rooms[side], R)
 
 
 # ---------------------------------------------------------------- verification

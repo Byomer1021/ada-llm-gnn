@@ -18,9 +18,13 @@ passage:
   door_wall_tolerance_mm: 400      # how far a door centre may be from a room edge and still count as on that wall
 
 missing_values:
-  # What to do when a value is missing in the IFC file.
-  # "fail" = treat the element as failing (conservative, never says "reachable" by mistake)
-  policy: fail
+  # What to do when a value is neither in the IFC file nor estimable (config/derive.yaml),
+  # e.g. door hardware height in a real ArchiCAD / Revit export.
+  # "not_checked" = the rule is not checked for that element: it does not fail, and the
+  #                 report lists it under "not checked" (Omer's decision, 20.10.2026)
+  # "fail"        = treat the element as failing (conservative; compared in experiment E4)
+  # Synthetic buildings always have every value, so their labels are the same either way.
+  policy: not_checked
 
 verdict:
   # Building verdict: "accessible" if every room can be reached from the entrance.
