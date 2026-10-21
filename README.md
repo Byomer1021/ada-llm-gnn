@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ## Check that everything works
 
 ```bash
-python -m pytest                    # 129 tests (GNN tests are skipped if torch is missing)
+python -m pytest                    # 131 tests (GNN tests are skipped if torch is missing)
 python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
 ```
 The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without
@@ -50,6 +50,8 @@ python -m src.llm.generate --role teacher --provider openai --model gpt-4.1 --n 
 # verified teacher answers -> student training file
 python -m src.llm.generate --export-sft
 
+# student on Colab (L4 / A100): notebooks/student_colab.ipynb does all of the below (train, serve,
+# pilot, E1 baseline, 2,000 buildings) and keeps every output on Google Drive
 # student: LoRA fine-tuning of Qwen 7B on a GPU (Colab / lab PC); settings in config/student.yaml
 pip install -r requirements-student.txt
 python -m src.llm.train_student                      # -> models/student/<time>/adapter, experiments/<time>_student/

@@ -60,7 +60,18 @@ def test_input_norm_standardises_values_only():
     assert abs(float(allx[rooms, 0].mean())) < 1e-4  # room width standardised over the training rooms
     assert torch.equal(x[:, 3:], graphs[0].x[:, 3:])  # missing flags and is_exterior unchanged
     assert torch.equal(e[:, 5:], graphs[0].edge_attr[:, 5:])  # door flags and wall one-hots unchanged
-    assert "norm.x_mean" in model.state_dict()  # saved with the checkpoint
+    assert "norm.x_mean" in model.state_dict() and "norm.d_hi" in model.state_dict()  # in the checkpoint
+    # far outside the training range (real file: 7110 mm clearance) -> clamped, not extrapolated
+    far = graphs[0].clone()
+    far.door_attr = far.door_attr.clone()
+    far.door_attr[:, 3] = 7.11  # maneuvering pull, m
+    top = (model.norm.d_hi[3] - model.norm.d_mean[3]) / model.norm.d_std[3]
+    assert torch.allclose(model.norm(far)[2][:, 3], top.expand(far.door_attr.shape[0]))
+    # order is kept: a wider door never gets a smaller rank
+    a, b = graphs[0].clone(), graphs[0].clone()
+    a.door_attr, b.door_attr = a.door_attr.clone(), b.door_attr.clone()
+    a.door_attr[:, 0], b.door_attr[:, 0] = 0.80, 0.83
+    assert bool((model.norm(a)[2][:, 0] <= model.norm(b)[2][:, 0]).all())
 
 
 def test_run_agents_output_format():

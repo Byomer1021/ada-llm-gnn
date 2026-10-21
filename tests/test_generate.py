@@ -114,7 +114,15 @@ def test_layout_of_the_prompt_must_be_followed():
 
 def _dry_args(seed, n=3):
     return argparse.Namespace(role="teacher", provider="nemotron", model=None, base_url=None, n=n, temperature=1.0,
-                              max_tokens=100, seed=seed, workers=1, scenario=None, write_ifc=False, dry_run=True)
+                              max_tokens=100, seed=seed, workers=1, scenario=None, tag=None, write_ifc=False,
+                              dry_run=True)
+
+
+def test_tag_keeps_e1_baseline_apart(tmp_path, monkeypatch):
+    monkeypatch.setattr(gen, "OUT_DIR", tmp_path)
+    gen.generate(argparse.Namespace(**{**vars(_dry_args(0)), "role": "student", "tag": "student_base"}))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["student_base_dryrun_raw.jsonl",
+                                                          "student_base_dryrun_verified.jsonl"]
 
 
 def test_seed_is_stored_and_reuse_warns(tmp_path, monkeypatch, capsys):

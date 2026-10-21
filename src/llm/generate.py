@@ -30,6 +30,8 @@ Usage
   python -m src.llm.generate --role teacher --provider openai --model gpt-4.1 --n 20
   # student, local server (e.g. vllm serve <finetuned-qwen> --port 8000)
   python -m src.llm.generate --role student --provider local --model qwen-ada --n 2000 --write-ifc
+  # the untrained base model for experiment E1, in its own files (data/llm/student_base_*.jsonl)
+  python -m src.llm.generate --role student --tag student_base --provider local --model Qwen/Qwen2.5-7B-Instruct --n 50
   # no API at all: fake answers, to test the script. They go to their own files
   # (teacher_dryrun_*.jsonl, data/synthetic/teacher_dryrun/), never into the real data
   python -m src.llm.generate --dry-run --n 10
@@ -354,7 +356,8 @@ def used_seeds(raw_path: Path) -> set:
 def generate(args):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rules = load_rules()
-    tag = f"{args.role}_dryrun" if args.dry_run else args.role  # fake records never mix with the real ones
+    base = args.tag or args.role  # e.g. --tag student_base: the untrained Qwen for E1, apart from the student
+    tag = f"{base}_dryrun" if args.dry_run else base  # fake records never mix with the real ones
     used = used_seeds(OUT_DIR / f"{tag}_raw.jsonl")
     if args.seed in used:
         print(f"WARNING: seed {args.seed} was already used for {tag}: same scenario order as before. "
@@ -459,6 +462,9 @@ if __name__ == "__main__":
     ap.add_argument("--workers", type=int, default=1, help="API requests at the same time (default 1)")
     ap.add_argument("--scenario", nargs="+", choices=[s["id"] for s in SCENARIOS], default=None,
                     help="only these scenarios (default: all, uniformly), e.g. to top up a rare one")
+    ap.add_argument("--tag", default=None,
+                    help="file name prefix instead of the role, e.g. student_base for the untrained Qwen (E1): "
+                         "data/llm/student_base_*.jsonl, data/synthetic/student_base/")
     ap.add_argument("--write-ifc", action="store_true", help="write every verified building as an IFC file")
     ap.add_argument("--dry-run", action="store_true",
                     help="no API calls, fake answers, written to <role>_dryrun_* files (apart from the real data)")

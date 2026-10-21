@@ -26,7 +26,7 @@ from src.ada.rules import DOOR_RULES
 NODE_DIM = 2 * len(NODE_FEATURES) + 1
 EDGE_DIM = 2 * len(EDGE_FEATURES) + 2 * len(SIDES)
 DOOR_DIM = 2 * len(EDGE_FEATURES)
-MODEL_VERSION = 2  # 2: InputNorm (checkpoints of version 1 have no normalisation statistics)
+MODEL_VERSION = 3  # 2: InputNorm mean / std, 3: + clamp to the training range (older checkpoints are refused)
 CONVS = ["gine", "gatv2", "mpnn_max", "sage"]
 AGENTS = ["door", "room", "route"]
 
@@ -36,41 +36,51 @@ def mlp(i: int, h: int, o: int) -> nn.Sequential:
 
 
 class InputNorm(nn.Module):
-    """Standardises the measured values (mm) with the TRAINING set's mean / std; missing flags,
-    is_exterior and wall one-hots pass unchanged. Without it the network barely separates a
-    door just below 815 mm from one just above (0.80 vs 0.83 after mm / 1000), while a
-    decision tree on the same features does it easily. Fitted once in train.py; the statistics
-    are buffers, so they are saved in the checkpoint and used at check time too."""
+    """Standardises the measured values (mm) with the TRAINING split's mean / std, after clamping
+    them to the training range; missing flags, is_exterior and wall one-hots pass unchanged.
+
+    Tried on the 231 teacher buildings (20-21.10.2026, 3 seeds, tiny test split, so read with
+    care): raw mm / 1000 -> door 0.51, room 0.62, route 0.74 (F1 of the failing class);
+    mean / std -> 0.68 / 0.67 / 0.84; a quantile (rank) transform -> 0.61 / 0.77 / 0.78.
+    The clamp keeps the one real advantage of the ranks: values outside the training range
+    (real files: a 7110 mm clearance) are not extrapolated by the network.
+    Fitted once in train.py; the statistics are buffers, saved in the checkpoint."""
 
     def __init__(self):
         super().__init__()
         for name, dim in (("x", NODE_DIM), ("e", EDGE_DIM), ("d", DOOR_DIM)):
             self.register_buffer(f"{name}_mean", torch.zeros(dim))
             self.register_buffer(f"{name}_std", torch.ones(dim))
+            self.register_buffer(f"{name}_lo", torch.full((dim,), -1e9))
+            self.register_buffer(f"{name}_hi", torch.full((dim,), 1e9))
 
     @torch.no_grad()
     def fit(self, graphs) -> "InputNorm":
-        nv, ev = len(NODE_FEATURES), len(EDGE_FEATURES)
-
-        def stats(t, n, rows=None):  # value j is in column j, its missing flag in column n + j
-            mean, std = torch.zeros(t.shape[1]), torch.ones(t.shape[1])
+        def stats(name, t, n, rows=None):  # value j is in column j, its missing flag in column n + j
+            mean, std, lo, hi = (getattr(self, f"{name}_{s}").clone() for s in ("mean", "std", "lo", "hi"))
             for j in range(n):
                 keep = t[:, n + j] == 0
                 if rows is not None:
                     keep &= rows
                 if int(keep.sum()) > 1:
-                    mean[j], std[j] = t[keep, j].mean(), t[keep, j].std().clamp(min=1e-3)
-            return mean, std
+                    v = t[keep, j]
+                    mean[j], std[j], lo[j], hi[j] = v.mean(), v.std().clamp(min=1e-3), v.min(), v.max()
+            for s, val in zip(("mean", "std", "lo", "hi"), (mean, std, lo, hi)):
+                setattr(self, f"{name}_{s}", val)
 
+        nv, ev = len(NODE_FEATURES), len(EDGE_FEATURES)
         x = torch.cat([g.x for g in graphs])
-        self.x_mean, self.x_std = stats(x, nv, rows=x[:, -1] == 0)  # rooms only, not EXTERIOR
-        self.e_mean, self.e_std = stats(torch.cat([g.edge_attr for g in graphs]), ev)
-        self.d_mean, self.d_std = stats(torch.cat([g.door_attr for g in graphs]), ev)
+        stats("x", x, nv, rows=x[:, -1] == 0)  # rooms only, not EXTERIOR
+        stats("e", torch.cat([g.edge_attr for g in graphs]), ev)
+        stats("d", torch.cat([g.door_attr for g in graphs]), ev)
         return self
 
+    def _scale(self, t, name):
+        mean, std, lo, hi = (getattr(self, f"{name}_{s}") for s in ("mean", "std", "lo", "hi"))
+        return (torch.minimum(torch.maximum(t, lo), hi) - mean) / std
+
     def forward(self, data):
-        return ((data.x - self.x_mean) / self.x_std, (data.edge_attr - self.e_mean) / self.e_std,
-                (data.door_attr - self.d_mean) / self.d_std)
+        return self._scale(data.x, "x"), self._scale(data.edge_attr, "e"), self._scale(data.door_attr, "d")
 
 
 class MaxMPNN(MessagePassing):
