@@ -25,6 +25,9 @@ Serve the adapter with vLLM (no merge needed), then generate with the student:
         --lora-modules qwen-ada=models/student/<time>/adapter --port 8000
     python -m src.llm.generate --role student --provider local --model qwen-ada --n 2000 --workers 8 --write-ifc
 --merge also writes models/student/<time>/merged/ (the full model, e.g. for Ollama; needs ~16 GB RAM).
+
+The same script fine-tunes the main agent: --config config/main_agent_sft.yaml
+(data from python -m src.agents.main_agent_sft; served as qwen-main, scored with scripts/evaluate.py).
 """
 from __future__ import annotations
 
@@ -169,7 +172,7 @@ def main(args):
         "tokens": {"mean": statistics.mean(lengths), "median": statistics.median(lengths), "max": lengths[-1]},
         "final_eval": final_eval, "log_history": trainer.state.log_history, "seconds": seconds,
         "adapter": _rel(adapter)}
-    exp = ROOT / "experiments" / f"{run}_student"
+    exp = ROOT / "experiments" / f"{run}_{cfg.get('experiment', 'student')}"
     exp.mkdir(parents=True, exist_ok=True)
     (exp / "metrics.json").write_text(json.dumps(metrics, indent=1, default=str), encoding="utf-8")
     print(f"Trained in {seconds} s; eval loss {final_eval.get('eval_loss')}. Adapter: {adapter}\n"
@@ -191,8 +194,7 @@ def main(args):
         print(f"Merged model: {out_dir / 'merged'}")
     name = cfg["served_name"]
     print(f"Serve:  vllm serve {base} --enable-lora --max-lora-rank {lc['r']} --lora-modules {name}={adapter} "
-          f"--port 8000\nThen:   python -m src.llm.generate --role student --provider local --model {name} "
-          f"--n 2000 --workers 8 --write-ifc")
+          f"--port 8000")
 
 
 if __name__ == "__main__":

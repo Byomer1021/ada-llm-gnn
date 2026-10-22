@@ -1,0 +1,33 @@
+# Fine-tuned main agent (E3, 22.10.2026): LoRA on Qwen 7B, answers made from the labels of the
+# train + validation buildings (python -m src.agents.main_agent_sft). Same script as the student:
+#   python -m src.llm.train_student --config config/main_agent_sft.yaml
+# The untuned Qwen 7B scored building macro F1 0.57 (zero-shot and few-shot) on the test split.
+
+base_model: Qwen/Qwen2.5-7B-Instruct
+data: data/llm/main_agent_sft.jsonl
+val_frac: 0.05                     # held-out buildings for the eval loss (split by building, fixed seed)
+seed: 0
+
+# system prompt + findings + answer; examples longer than this are DROPPED, never cut
+max_length: 4096
+
+load_in_4bit: true                 # the Colab notebook passes --no-4bit on an 80 GB A100
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+train:
+  epochs: 1                        # ~1,900 short, similar examples; one pass is a first try
+  learning_rate: 2.0e-4
+  batch_size: 4
+  grad_accum: 4                    # effective batch 16
+  warmup_ratio: 0.05
+  scheduler: cosine
+  gradient_checkpointing: true
+
+output_dir: models/main_agent      # <output_dir>/<time>/adapter
+served_name: qwen-main             # model name for vLLM and for evaluate.py --llm-model
+experiment: main_agent             # experiments/<time>_<experiment>/metrics.json

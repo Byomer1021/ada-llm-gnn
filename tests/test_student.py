@@ -1,7 +1,9 @@
 """Student training data: prompt-completion format, split by building, long examples dropped (no GPU needed)."""
 import json
 
-from src.llm.train_student import drop_long, load_config, load_examples, split
+import pytest
+
+from src.llm.train_student import ROOT, drop_long, load_config, load_examples, split
 
 
 def _sft(tmp_path, n=20):
@@ -35,7 +37,8 @@ def test_long_examples_are_dropped_not_cut(tmp_path):
     assert [e["completion"] for e in kept] == [ex[0]["completion"], ex[2]["completion"]]  # unchanged
 
 
-def test_config_has_what_the_script_reads():
-    cfg = load_config()
+@pytest.mark.parametrize("config", ["student.yaml", "main_agent_sft.yaml"])
+def test_config_has_what_the_script_reads(config):
+    cfg = load_config(ROOT / "config" / config)
     assert {"base_model", "data", "val_frac", "seed", "max_length", "load_in_4bit", "lora", "train",
             "output_dir", "served_name"} <= set(cfg)
