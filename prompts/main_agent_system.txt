@@ -12,8 +12,9 @@ You receive their findings as JSON:
 - rooms[].turning_fail_prob: room agent, probability that the room's turning space
     FAILS ADA 304.3.1 (diameter >= 1525 mm)
 - rooms[].reachable_prob: route agent, probability that a wheelchair user can get
-    from the entrance to that room (it knows on which walls the doors are; crossing a
-    room that cannot turn around is only possible in a straight line, ADA 403.5.1)
+    from the entrance to that room. A second opinion: it is less reliable than tracing
+    the path yourself with the door and room agents (see below)
+- doors[].walls: on which wall of each room the door is (S, N, W, E; "?" unknown)
 - values: the measurements read from the IFC file (mm; null = not in the file)
 - estimated: values the file did not carry and that were estimated from its geometry
     or standard IFC data (e.g. clear width from the door's overall width); approximate
@@ -30,11 +31,16 @@ list it under "warnings".
 
 HOW TO COMBINE THE AGENTS
 - A probability >= 0.5 means "yes". Values close to 0.5 are uncertain: say so.
-- Use the route agent for reachability, and the door and room agents to explain WHY.
-- If they disagree (e.g. a room is predicted unreachable but no door or room on the
-  way fails, or a door on the only path fails but the room behind it is predicted
-  reachable), check the raw values against the rules above, decide, and mention the
-  disagreement in "explanation".
+- Trace the path yourself, starting at EXTERIOR: a door can be passed unless the door
+  agent says it fails a rule. A room whose turning space fails can be entered, but
+  crossed to the next room only in a straight line: the door you enter by and the door
+  you leave by are on OPPOSITE walls of that room (S-N or W-E, see doors[].walls) and
+  the room is at least 915 mm wide across the way (ADA 403.5.1). Doors on ADJACENT
+  walls need a turn, so the rooms behind cannot be reached (ADA 304.3.1). An unknown
+  wall ("?") counts as needing a turn.
+- Use the route agent as a second opinion. If it disagrees with your path, trust the
+  path, check the raw values against the rules above, and mention the disagreement in
+  "explanation".
 - A null probability means the rule could not be checked (value not in the file). It
   does NOT count as failing and never goes into "failing_rules"; the system reports it
   separately. If a decision rests on estimated values, say so in "explanation".

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from collections import deque
 from pathlib import Path
 
 import yaml
@@ -30,11 +31,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.ada.rules import ACCESSIBLE, DOOR_RULES, EXTERIOR, NOT_ACCESSIBLE, ROOM_RULE  # noqa: E402
+from src.ada.rules import ACCESSIBLE, DOOR_RULES, EXTERIOR, NOT_ACCESSIBLE, OPPOSITE, ROOM_RULE, load_rules  # noqa: E402
+
+PASSAGE_RULE = "ADA 403.5.1"
 
 SYSTEM_PROMPT = (ROOT / "prompts" / "main_agent_system.txt").read_text(encoding="utf-8")
 CONFIG = ROOT / "config" / "pipeline.yaml"
-KNOWN_RULES = set(DOOR_RULES) | {ROOM_RULE, "ADA 403.5.1"}
+KNOWN_RULES = set(DOOR_RULES) | {ROOM_RULE, PASSAGE_RULE}
 
 
 def load_config(path: str | Path = CONFIG) -> dict:
@@ -43,14 +46,78 @@ def load_config(path: str | Path = CONFIG) -> dict:
 
 
 # ---------------------------------------------------------------- baseline without an LLM
-def rule_decide(findings: dict, thr: float = 0.5) -> dict:
-    """Fixed combination: reachability from the route agent, causes from the door / room agents."""
-    rooms = {r["id"]: r for r in findings["rooms"]}
-    reach = {rid: r["reachable_prob"] >= thr for rid, r in rooms.items()} | {EXTERIOR: True}
-    # None = rule not checked (value not in the file): never counts as failing
+def _fails(findings: dict, thr: float) -> tuple[dict, set]:
+    """Doors' failing rules and rooms that cannot turn, as the door and room agents predict them.
+    None = rule not checked (value not in the file): never counts as failing."""
     door_fails = {d["id"]: [r for r, p in d["fail_prob"].items() if p is not None and p >= thr]
                   for d in findings["doors"]}
-    turn_fails = {rid for rid, r in rooms.items() if (r["turning_fail_prob"] or 0) >= thr}
+    turn_fails = {r["id"] for r in findings["rooms"] if (r["turning_fail_prob"] or 0) >= thr}
+    return door_fails, turn_fails
+
+
+def path_search(findings: dict, thr: float = 0.5, passage_min_mm: float | None = None) -> tuple[set, dict]:
+    """Reachability from EXTERIOR over the DOOR and ROOM agents' predictions and the door walls.
+
+    A door is passable unless the door agent predicts a failing rule. A room the room agent says
+    cannot turn around is entered, but crossed only in a straight line: entry and exit door on
+    opposite walls, and the room at least `passage_min_mm` across (ADA 403.5.1, from
+    config/ada_rules.yaml). Unknown wall -> a turn is assumed, as in the rule engine.
+    Returns (reached rooms, room -> [(element, rule)] that blocked it)."""
+    if passage_min_mm is None:
+        passage_min_mm = load_rules()["passage"]["straight_min_width_mm"]
+    rooms = {r["id"]: r for r in findings["rooms"]}
+    door_fails, turn_fails = _fails(findings, thr)
+    by_room: dict[str, list] = {rid: [] for rid in rooms} | {EXTERIOR: []}
+    for d in findings["doors"]:
+        if all(x in by_room for x in d["connects"]):
+            for x in d["connects"]:
+                by_room[x].append(d)
+    other = lambda d, x: d["connects"][1] if d["connects"][0] == x else d["connects"][0]
+    blocked: dict[str, list] = {rid: [] for rid in rooms}
+    reached, seen, q = set(), set(), deque()
+
+    def enter(d, tgt):
+        if door_fails[d["id"]]:
+            blocked[tgt] += [(d["id"], r) for r in door_fails[d["id"]]]
+        else:
+            q.append((tgt, d))
+
+    for d in by_room[EXTERIOR]:
+        enter(d, other(d, EXTERIOR))
+    while q:
+        rid, din = q.popleft()
+        if (rid, din["id"]) in seen:
+            continue
+        seen.add((rid, din["id"]))
+        reached.add(rid)
+        for d in by_room[rid]:
+            tgt = other(d, rid)
+            if d["id"] == din["id"] or tgt == EXTERIOR:
+                continue
+            if rid in turn_fails:  # can this room be crossed without turning?
+                walls = (din.get("walls", {}).get(rid, "?"), d.get("walls", {}).get(rid, "?"))
+                if walls not in OPPOSITE:
+                    blocked[tgt].append((rid, ROOM_RULE))
+                    continue
+                v = rooms[rid]["values"]
+                across = v.get("width_mm") if walls[0] in ("S", "N") else v.get("length_mm")
+                if across is None or across < passage_min_mm:
+                    blocked[tgt].append((rid, PASSAGE_RULE))
+                    continue
+            enter(d, tgt)
+    return reached, blocked
+
+
+def rule_decide(findings: dict, thr: float = 0.5, reachability: str = "paths") -> dict:
+    """Fixed combination, no LLM (baseline).
+    reachability "paths" (default): path_search over the door / room agents and the door walls;
+    the route agent is a second opinion, reported when it disagrees.
+    reachability "route": the route agent's reachable_prob decides (the original design)."""
+    if reachability == "paths":
+        return _paths_decide(findings, thr)
+    rooms = {r["id"]: r for r in findings["rooms"]}
+    reach = {rid: r["reachable_prob"] >= thr for rid, r in rooms.items()} | {EXTERIOR: True}
+    door_fails, turn_fails = _fails(findings, thr)
     failing, blamed = [], set()
     for d in findings["doors"]:
         a, b = d["connects"]
@@ -74,7 +141,30 @@ def rule_decide(findings: dict, thr: float = 0.5) -> dict:
     if unreachable and not failing:
         warnings.append("route agent predicts unreachable rooms but no failing element was found on the way")
     return {"label": NOT_ACCESSIBLE if unreachable else ACCESSIBLE, "failing_rules": failing,
-            "warnings": warnings, "explanation": expl, "provider": "rule"}
+            "warnings": warnings, "explanation": expl, "provider": "rule:route"}
+
+
+def _paths_decide(findings: dict, thr: float) -> dict:
+    rooms = {r["id"]: r for r in findings["rooms"]}
+    reached, blocked = path_search(findings, thr)
+    unreachable = [rid for rid in rooms if rid not in reached]
+    failing = list(dict.fromkeys(c for rid in unreachable for c in blocked[rid]))
+    used = {e for e, _ in failing}
+    door_fails, turn_fails = _fails(findings, thr)
+    warnings = [f"{rid}: turning space may fail ({ROOM_RULE}); reachable but cannot turn around"
+                for rid in rooms if rid in turn_fails and rid in reached]
+    warnings += [f"{did}: fails {', '.join(r)} but blocks no room" for did, r in door_fails.items()
+                 if r and did not in used]
+    warnings += [f"route agent disagrees on {rid}: reachable_prob {r['reachable_prob']:.2f}"
+                 for rid, r in rooms.items() if (r["reachable_prob"] >= thr) != (rid in reached)]
+    if not unreachable:
+        expl = "All rooms can be reached from the entrance."
+    else:
+        why = "; ".join(f"{e} ({rule})" for e, rule in failing) or "no entrance door / no door to it"
+        expl = f"Not reachable from the entrance: {', '.join(unreachable)}. Blocked by: {why}."
+    return {"label": NOT_ACCESSIBLE if unreachable else ACCESSIBLE,
+            "failing_rules": [{"element": e, "rule": r} for e, r in failing],
+            "warnings": warnings, "explanation": expl, "provider": "rule:paths"}
 
 
 # ---------------------------------------------------------------- LLM
@@ -135,7 +225,7 @@ def _decide(findings: dict, provider: str | None, cfg: dict | None, clients: dic
     m = cfg["main_agent"]
     provider = provider or m["provider"]
     if provider == "rule":
-        return rule_decide(findings, cfg["agents"]["threshold"])
+        return rule_decide(findings, cfg["agents"]["threshold"], m.get("reachability", "paths"))
     order = {"auto": ["local", "openai"], "local": ["local"], "openai": ["openai"]}[provider]
     errors = []
     for name in order:

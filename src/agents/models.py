@@ -28,6 +28,7 @@ EDGE_DIM = 2 * len(EDGE_FEATURES) + 2 * len(SIDES)
 DOOR_DIM = 2 * len(EDGE_FEATURES)
 MODEL_VERSION = 3  # 2: InputNorm mean / std, 3: + clamp to the training range (older checkpoints are refused)
 CONVS = ["gine", "gatv2", "mpnn_max", "sage"]
+ROUTE_ONLY = ["transit"]  # route agent on the transit graph (TransitRouteAgent)
 AGENTS = ["door", "room", "route"]
 
 
@@ -83,6 +84,58 @@ class InputNorm(nn.Module):
         return self._scale(data.x, "x"), self._scale(data.edge_attr, "e"), self._scale(data.door_attr, "d")
 
 
+class QuantileNorm(nn.Module):
+    """Option `--norm quantile`: each measured value becomes its rank in the TRAINING split, mapped
+    to [-1, 1] (piecewise linear between 65 quantiles; outside the training range: -1 / 1); flags and
+    one-hots pass unchanged, a missing value becomes 0. Resolution follows the data: dense near the
+    ADA limits (the prompts put many values there), so 1500 vs 1550 mm of maneuvering clearance,
+    0.02 standard deviations apart after mean / std (values spread over 700-6000 mm), are many
+    ranks apart. Knows nothing about the ADA limits. Same interface as InputNorm."""
+
+    K = 65
+
+    def __init__(self):
+        super().__init__()
+        for name, n in (("x", len(NODE_FEATURES)), ("e", len(EDGE_FEATURES)), ("d", len(EDGE_FEATURES))):
+            self.register_buffer(f"{name}_q", torch.linspace(0, 1, self.K).repeat(n, 1))
+
+    @torch.no_grad()
+    def fit(self, graphs) -> "QuantileNorm":
+        def quantiles(t, n, rows=None):  # value j is in column j, its missing flag in column n + j
+            q = torch.linspace(0, 1, self.K).repeat(n, 1)
+            for j in range(n):
+                keep = t[:, n + j] == 0
+                if rows is not None:
+                    keep &= rows
+                if int(keep.sum()) > 1:
+                    q[j] = torch.quantile(t[keep, j], torch.linspace(0, 1, self.K))
+            return q
+
+        nv, ev = len(NODE_FEATURES), len(EDGE_FEATURES)
+        x = torch.cat([g.x for g in graphs])
+        self.x_q = quantiles(x, nv, rows=x[:, -1] == 0)  # rooms only, not EXTERIOR
+        self.e_q = quantiles(torch.cat([g.edge_attr for g in graphs]), ev)
+        self.d_q = quantiles(torch.cat([g.door_attr for g in graphs]), ev)
+        return self
+
+    def _rank(self, t, q):
+        out, n = t.clone(), q.shape[0]
+        for j in range(n):
+            v, qj = t[:, j].contiguous(), q[j]
+            i = torch.searchsorted(qj, v).clamp(1, self.K - 1)
+            lo, hi = qj[i - 1], qj[i]
+            u = (i - 1 + ((v - lo) / (hi - lo).clamp(min=1e-9)).clamp(0, 1)) / (self.K - 1)
+            u = torch.where(v <= qj[0], torch.zeros_like(u), torch.where(v >= qj[-1], torch.ones_like(u), u))
+            out[:, j] = torch.where(t[:, n + j] > 0, torch.zeros_like(u), 2 * u - 1)
+        return out
+
+    def forward(self, data):
+        return self._rank(data.x, self.x_q), self._rank(data.edge_attr, self.e_q), self._rank(data.door_attr, self.d_q)
+
+
+NORMS = {"standard": InputNorm, "quantile": QuantileNorm}
+
+
 class MaxMPNN(MessagePassing):
     def __init__(self, dim: int, edge_dim: int):
         super().__init__(aggr="max")
@@ -127,9 +180,9 @@ class Encoder(nn.Module):
 class DoorAgent(nn.Module):
     n_out = len(DOOR_RULES)
 
-    def __init__(self, conv="gine", hidden=64, layers=2):
+    def __init__(self, conv="gine", hidden=64, layers=2, norm="standard"):
         super().__init__()
-        self.norm = InputNorm()
+        self.norm = NORMS[norm]()
         self.enc = Encoder(conv, hidden, layers)
         self.head = mlp(2 * hidden + DOOR_DIM, hidden, self.n_out)
 
@@ -144,9 +197,9 @@ class DoorAgent(nn.Module):
 class _NodeAgent(nn.Module):
     n_out = 1
 
-    def __init__(self, conv="gine", hidden=64, layers=4):
+    def __init__(self, conv="gine", hidden=64, layers=4, norm="standard"):
         super().__init__()
-        self.norm = InputNorm()
+        self.norm = NORMS[norm]()
         self.enc = Encoder(conv, hidden, layers)
         self.head = mlp(hidden + NODE_DIM, hidden, 1)
 
@@ -163,12 +216,79 @@ class RouteAgent(_NodeAgent):
     pass
 
 
+# ---------------------------------------------------------------- route agent on the transit graph
+WALL = len(SIDES)
+TRANSIT_NODE_DIM = DOOR_DIM + 1               # door values + missing flags, is_entrance
+TRANSIT_EDGE_DIM = 2 * WALL + NODE_DIM        # wall in the room of the door we came in by and of the
+                                              # door we leave by, + that room's features
+
+
+def transit(x, edge_index, edge_attr):
+    """The room-door graph -> the TRANSIT graph the route agent reasons on.
+
+    A transit node is one direction of a door: "enter room t through door d" (edge u -> t of the
+    room-door graph; entering EXTERIOR is left out). A transit edge joins "enter r through d1" to
+    "enter t through d2" when d2 is another door of r: crossing r from d1 to d2. Its features carry
+    the walls of r that d1 and d2 are on, together with r's features, so "does crossing r need a
+    turn?" sits on ONE edge. On the room-door graph the two walls are on two different edges, and
+    the route agent did not learn to compare them (22.10.2026: r1_small_straight 28 / 40 wrong).
+
+    Works on batches: to_pyg writes both directions of a door next to each other, so door id =
+    edge index // 2 also after batching. Returns (node features, transit edge_index, edge features,
+    room each transit node enters)."""
+    src, dst = edge_index
+    is_ext = x[:, -1] > 0.5
+    door = torch.arange(edge_index.shape[1], device=x.device) // 2
+    keep = (~is_ext[dst]).nonzero().view(-1)                       # transit nodes = these edges
+    tid = torch.full((edge_index.shape[1],), -1, dtype=torch.long, device=x.device)
+    tid[keep] = torch.arange(len(keep), device=x.device)
+    nodes = torch.cat([edge_attr[keep, :DOOR_DIM], is_ext[src[keep]].float().unsqueeze(1)], 1)
+    # pairs (e1 into r, e2 out of r), another door, not leaving to EXTERIOR
+    pair = (dst[keep].unsqueeze(1) == src[keep].unsqueeze(0)) & (door[keep].unsqueeze(1) != door[keep].unsqueeze(0))
+    a, b = pair.nonzero(as_tuple=True)
+    e1, e2 = keep[a], keep[b]
+    wall_in, wall_out = slice(DOOR_DIM + WALL, DOOR_DIM + 2 * WALL), slice(DOOR_DIM, DOOR_DIM + WALL)
+    feats = torch.cat([edge_attr[e1, wall_in], edge_attr[e2, wall_out], x[dst[e1]]], 1)
+    return nodes, torch.stack([tid[e1], tid[e2]]), feats, dst[keep]
+
+
+class TransitRouteAgent(nn.Module):
+    """Route agent on the transit graph: max-aggregation message passing ("reachable if ANY way in is
+    reachable"); a room's logit is the max over the transit nodes that enter it. Same input
+    (the room-door graph), same output (one logit per node; EXTERIOR is masked) as RouteAgent."""
+    n_out = 1
+
+    def __init__(self, conv="transit", hidden=64, layers=4, norm="standard"):
+        super().__init__()
+        self.norm = NORMS[norm]()
+        self.inp = nn.Linear(TRANSIT_NODE_DIM, hidden)
+        self.edge = nn.Linear(TRANSIT_EDGE_DIM, hidden)
+        self.convs = nn.ModuleList(MaxMPNN(hidden, hidden) for _ in range(layers))
+        self.norms = nn.ModuleList(nn.LayerNorm(hidden) for _ in range(layers))
+        self.head = mlp(hidden + TRANSIT_NODE_DIM, hidden, 1)
+
+    def forward(self, data):
+        x, e, _ = self.norm(data)
+        tx, tei, te, into = transit(x, data.edge_index, e)
+        h, ee = self.inp(tx), self.edge(te)
+        for conv, norm in zip(self.convs, self.norms):
+            h = norm(h + torch.relu(conv(h, tei, ee)))
+        logit = self.head(torch.cat([h, tx], -1)).squeeze(-1)
+        out = torch.full((x.shape[0],), -10.0, device=x.device)  # no way in -> not reachable
+        return out.scatter_reduce(0, into, logit, reduce="amax", include_self=True)
+
+
 CLASSES = {"door": DoorAgent, "room": RoomAgent, "route": RouteAgent}
 
 
-def build_agent(agent: str, conv: str = "gine", hidden: int = 64, layers: int | None = None) -> nn.Module:
+def build_agent(agent: str, conv: str = "gine", hidden: int = 64, layers: int | None = None,
+                norm: str = "standard") -> nn.Module:
     layers = layers or (2 if agent == "door" else 4)
-    return CLASSES[agent](conv=conv, hidden=hidden, layers=layers)
+    if conv in ROUTE_ONLY:
+        if agent != "route":
+            raise ValueError(f"conv {conv!r} is for the route agent only")
+        return TransitRouteAgent(conv=conv, hidden=hidden, layers=layers, norm=norm)
+    return CLASSES[agent](conv=conv, hidden=hidden, layers=layers, norm=norm)
 
 
 def targets(agent: str, data):

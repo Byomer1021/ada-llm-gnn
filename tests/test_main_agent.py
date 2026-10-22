@@ -6,16 +6,44 @@ import pytest
 from src.ada.rules import evaluate
 from src.agents.gnn_agents import oracle_findings
 from src.agents.main_agent import _parse, decide, load_config, rule_decide
-from tests.test_rules import RULES, SCENARIOS
+from tests.test_rules import RULES, SCENARIOS, two_rooms
 
 
+@pytest.mark.parametrize("reachability", ["paths", "route"])
 @pytest.mark.parametrize("name,building,_", SCENARIOS, ids=[s[0] for s in SCENARIOS])
-def test_rule_main_agent_with_perfect_agents_matches_verdict(name, building, _):
+def test_rule_main_agent_with_perfect_agents_matches_verdict(name, building, _, reachability):
     v = evaluate(building, RULES)["verdict"]
-    d = rule_decide(oracle_findings(building, RULES))
+    d = rule_decide(oracle_findings(building, RULES), reachability=reachability)
     assert d["label"] == v["label"]
     assert {(f["element"], f["rule"]) for f in d["failing_rules"]} == \
            {(f["element"], f["rule"]) for f in v["failing_rules"]}
+
+
+def test_findings_carry_the_door_walls():
+    f = oracle_findings(two_rooms(), RULES)  # D1 on the south wall of R1, D2 between R1 (east) and R2 (west)
+    assert {d["id"]: d["walls"] for d in f["doors"]} == {"D1": {"R1": "S"}, "D2": {"R1": "E", "R2": "W"}}
+
+
+def test_paths_straight_crossing_blocked_by_a_narrow_room():
+    # R1 cannot turn; D1 west / D2 east = opposite walls, but R1 is only 900 mm across (< 915, ADA 403.5.1)
+    b = two_rooms(d1_xy=(0, 450), r1={"turning_space_diameter_mm": 800, "length_mm": 900},
+                  d2={"y_mm": 450})
+    b["rooms"][1]["length_mm"] = 900
+    v = evaluate(b, RULES)["verdict"]
+    d = rule_decide(oracle_findings(b, RULES))
+    assert v["label"] == d["label"] == "not_accessible"
+    assert d["failing_rules"] == [{"element": "R1", "rule": "ADA 403.5.1"}] == \
+           [{"element": f["element"], "rule": f["rule"]} for f in v["failing_rules"]]
+
+
+def test_paths_override_a_wrong_route_agent_and_say_so():
+    f = oracle_findings(two_rooms(r1={"turning_space_diameter_mm": 1300}, d1_xy=(0, 2400)), RULES)  # straight
+    for r in f["rooms"]:
+        r["reachable_prob"] = 0.0  # a route agent that thinks nothing can be reached
+    d = rule_decide(f)
+    assert d["label"] == "accessible"
+    assert sum("route agent disagrees" in w for w in d["warnings"]) == 2
+    assert rule_decide(f, reachability="route")["label"] == "not_accessible"
 
 
 class FakeClient:

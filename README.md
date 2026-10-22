@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ## Check that everything works
 
 ```bash
-python -m pytest                    # 131 tests (GNN tests are skipped if torch is missing)
+python -m pytest                    # 153 tests (GNN tests are skipped if torch is missing)
 python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
 ```
 The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without
@@ -69,7 +69,7 @@ IFC files in `data/synthetic/<role>/`.
 python -m src.agents.dataset                         # graphs + 70/15/15 split by IFC file
 python -m src.agents.train --agent door  --seeds 0 1 2
 python -m src.agents.train --agent room  --seeds 0 1 2
-python -m src.agents.train --agent route --conv mpnn_max --seeds 0 1 2
+python -m src.agents.train --agent route --conv transit --seeds 0 1 2   # route agent on the transit (line) graph
 ```
 Models go to `models/`, metrics to `experiments/`.
 

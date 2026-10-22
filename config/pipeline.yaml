@@ -10,6 +10,12 @@ main_agent:
   # local  = only the local model      openai = only the fallback model
   # rule   = no LLM: fixed combination rules (baseline for the experiments, works offline)
   provider: auto
+  # How the rule main agent decides which rooms can be reached:
+  # paths = trace from EXTERIOR over the door and room agents' predictions and the door walls
+  #         (the route agent is a second opinion, reported when it disagrees). Default since
+  #         22.10.2026: on the 336 test buildings building macro F1 0.892 vs 0.761 with "route".
+  # route = the route agent's reachable_prob (the original design; kept for E2 / E3)
+  reachability: paths
   local:
     # Ollama (Windows / Mac / Linux):  ollama pull qwen2.5:7b   -> http://localhost:11434/v1
     # vLLM (Linux + GPU):              vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 -> http://localhost:8000/v1
