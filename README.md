@@ -1,138 +1,129 @@
-# ADA accessibility checking of IFC buildings with LLMs and GNN agents
+# ADA accessibility checking of IFC buildings with LLM-generated data and GNN agents
 
-A large LLM (teacher) designs labelled single-storey IFC buildings. The rule engine
-verifies them and writes their labels, and the knowledge is distilled into a small LLM
-(student). Each IFC file becomes a graph (room = node, door = edge). Three GNN agents
-(door, room, route) check their own ADA rules in parallel, and an LLM main agent
-(Qwen 7B, or GPT-4.1-mini if that is not enough) combines their findings into the
-verdict: **accessible / not accessible + the failing ADA rule**. The verdict is shown
-in a report and a web UI.
+[![tests](https://github.com/Byomer1021/ada-llm-gnn/actions/workflows/tests.yml/badge.svg)](https://github.com/Byomer1021/ada-llm-gnn/actions/workflows/tests.yml)
 
-## Setup
+**Is this building accessible to a wheelchair user, and if not, which element breaks which rule of the
+2010 ADA Standards?** Given an IFC file, three graph neural network agents check the doors, the rooms and the
+route from the entrance, and a main agent gives the verdict, names the violated rule and writes a report.
 
-Python 3.10 or newer.
+There was no labelled training data, so the project makes its own: a large LLM describes buildings, code writes
+them to IFC, a rule engine verifies and labels every one, and a 7B model fine-tuned on the teacher's answers
+generates most of the data set.
+
+Paper: [docs/paper/main.pdf](docs/paper/main.pdf) (IEEE conference format, 6 pages).
+
+| Synthetic test building | Public IFC model (FZK-Haus, ground floor) |
+|---|---|
+| ![](docs/paper/figures/synthetic_building.png) | ![](docs/paper/figures/fzk_house.png) |
+| D2 fails ADA 404.2.4 (push-side clearance 1196 mm < 1220 mm), so R2 cannot be reached | Three inner doors fail on an **estimated** clear width of 745 mm |
+
+## Results
+
+Measured on 336 buildings that no model saw in training (225 inaccessible, 111 accessible).
+
+| | Result |
+|---|---|
+| Teacher LLM (Nemotron 3 Ultra): valid buildings | 231 / 231 |
+| Student (Qwen2.5-7B + LoRA) vs. the same model untuned | **81%** vs. 4% of attempts valid; 2,013 buildings |
+| Door / room / route agent, F1 of the failing class | 0.926 / 0.960 / 0.879 (3 seeds) |
+| **Building verdict, macro F1** (path tracing over the agents) | **0.938** (target 0.90; majority class 0.40) |
+| Same, fine-tuned 7B LLM as the main agent | 0.921 (not significantly different, p = 0.23) |
+| Same, untuned 7B LLM, zero-shot / few-shot | 0.569 / 0.566 |
+| 30% of the values deleted: inaccessible buildings missed | **3 / 225** (rule engine that skips unknown values: 72) |
+
+The full tables (generation, agents, main agents, missing data, real files) are in the paper.
+
+## How it works
+
+```
+GENERATION                                              CHECK
+teacher LLM -> JSON -> IFC writer -> rule engine       IFC file -> reader (+ estimates) -> room-door graph
+   (verify + label) -> student LLM (LoRA) -> 2,244     -> door / room / route GNN agents (parallel)
+   labelled IFC buildings                              -> main agent -> verdict + violated rule + report
+```
+
+- **The LLM never writes IFC.** It describes the building as JSON; our code writes the file
+  (IfcOpenShell). Code, not the model, fixes the layout and the values near each ADA limit, because
+  independent requests make a model return the same values every time.
+- **The rule engine only labels.** It verifies the generated buildings and writes the labels; the check
+  itself runs on the agents.
+- **Route agent on a transit graph:** a node is "entering room r through door d", an edge is "crossing r
+  from one door to another" and carries the walls of both doors. Whether a room that is too small to turn in
+  can be crossed straight (opposite walls) or not (adjacent walls) is then visible on a single edge.
+- **Missing values:** the agents are trained with randomly deleted values, which also made them better on
+  complete data.
+
+Rules checked: door clear width (404.2.3), threshold (404.2.5), hardware height (404.2.7), maneuvering
+clearance (404.2.4, simplified), turning space (304.3.1) and straight passage width (403.5.1). The limits
+live in [config/ada_rules.yaml](config/ada_rules.yaml).
+
+## Quick start
+
+Python 3.10+.
 
 ```bash
-cd ada-llm-gnn
 python -m venv .venv
-# Windows:  .venv\Scripts\activate
-# Mac/Linux: source .venv/bin/activate
-pip install torch            # or the command for your machine from https://pytorch.org/get-started/locally/
+.venv\Scripts\activate                 # Mac/Linux: source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
+
+python -m pytest                       # 180 tests
+python scripts/demo_pipeline.py        # one building: JSON -> IFC -> read -> graph -> agents -> verdict -> report
+streamlit run app/streamlit_app.py     # web UI: upload an IFC file
 ```
 
-## Check that everything works
+The data set and the trained agents are not in the repository (size, and the public IFC models keep their
+own licenses). Without trained agents, the demo and the UI use the *oracle* agents, which is the rule engine in
+place of the GNNs. The oracle is only for testing. To train your own agents, see below.
 
-```bash
-python -m pytest                    # 153 tests (GNN tests are skipped if torch is missing)
-python scripts/demo_pipeline.py     # one building: JSON -> IFC -> read -> graph -> agents -> main agent -> report
-```
-The demo writes `data/demo/demo.ifc`, `demo_report.md` and `demo_3d.png`. It runs without
-an API key or trained model: it uses the *oracle* agents (the rule engine in place of the
-GNNs, for testing only) and the *rule* main agent (no LLM).
+## Reproduce
 
-## 1. IFC generation (teacher -> verify -> student)
+| Step | Command | Needs |
+|---|---|---|
+| Teacher buildings | `python -m src.llm.generate --role teacher --provider nemotron --n 200 --write-ifc` | NVIDIA API key |
+| Student training data | `python -m src.llm.generate --export-sft` | |
+| Student (LoRA) + 2,000 buildings | [notebooks/student_colab.ipynb](notebooks/student_colab.ipynb) | GPU (A100 / L4) |
+| Graph data set (split by building) | `python -m src.agents.dataset` | |
+| Agents | `python -m src.agents.train --agent door --drop-frac 0.2 --models-dir models/missing` (also `room`; `route --conv transit`) | CPU, minutes |
+| Main agents, test split | `python scripts/evaluate.py --provider rule` | |
+| Fine-tuned LLM main agent | [notebooks/main_agent_sft_colab.ipynb](notebooks/main_agent_sft_colab.ipynb) | GPU |
+| Missing values (E4) | `python scripts/missing_data.py --agent-sets gnn=models gnn_aug=models/missing` | |
+| Public IFC models (E5) | `python scripts/test_real_ifc.py --folder data/real` | IFC files, e.g. [ifc-bench](https://huggingface.co/datasets/sylvainHellin/ifc-bench) |
 
-```bash
-# no API at all: fake answers, to test the whole chain. They are written to separate files
-# (data/llm/teacher_dryrun_*.jsonl, data/synthetic/teacher_dryrun/) and never mix with the real data;
-# the next steps read them with --export-sft --dry-run or --sources teacher_dryrun_verified (dataset)
-python -m src.llm.generate --dry-run --n 50 --write-ifc
+`python -m src.llm.generate --dry-run --n 50 --write-ifc` runs the whole chain without an API on fake answers,
+written to separate files.
 
-# teacher with Nemotron (key from build.nvidia.com)
-#   Windows PowerShell:  $env:NVIDIA_API_KEY="nvapi-..."
-#   Mac/Linux:           export NVIDIA_API_KEY=nvapi-...
-python -m src.llm.generate --role teacher --provider nemotron --n 20 --write-ifc
+## What it cannot do
 
-# teacher with GPT-4.1 (OPENAI_API_KEY); note: no reasoning trace is returned
-python -m src.llm.generate --role teacher --provider openai --model gpt-4.1 --n 20 --write-ifc
+- **Only synthetic, single-storey, two-room buildings were used for training and testing.** Corridors and
+  larger layouts are untested.
+- **The labels come from my own rule engine**, so the agents learn my reading of the rules: doors on
+  adjacent walls need a turn, ADA 404.2.4 is simplified to a front approach, and maneuvering clearance is
+  bounded by the room depth. No architect has reviewed these readings.
+- **On real files the verdicts are not validated.** Real exports carry no accessibility properties.
+  Estimated door widths depend on what `OverallWidth` means in each exporter: the leaf in Revit 2011, the
+  frame-inclusive width in Revit 2024. On 20 public models all 18 that could be checked came out
+  inaccessible, mostly on estimated widths, and two files with no `IfcSpace` cannot be checked at all.
+- **The fine-tuned LLM writes wrong explanations at times**, e.g. "clear width 824 mm < 815 mm". The
+  rule-based path tracing is as accurate and always consistent with its explanation.
+- **The fine-tuned LLM needs a GPU.** Without one, the UI uses the rule-based main agent and says so.
 
-# verified teacher answers -> student training file
-python -m src.llm.generate --export-sft
-
-# student on Colab (L4 / A100): notebooks/student_colab.ipynb does all of the below (train, serve,
-# pilot, E1 baseline, 2,000 buildings) and keeps every output on Google Drive
-# student: LoRA fine-tuning of Qwen 7B on a GPU (Colab / lab PC); settings in config/student.yaml
-pip install -r requirements-student.txt
-python -m src.llm.train_student                      # -> models/student/<time>/adapter, experiments/<time>_student/
-# serve the base model + the adapter with vLLM (no merge needed), then generate with the student
-vllm serve Qwen/Qwen2.5-7B-Instruct --enable-lora --max-lora-rank 16 \
-    --lora-modules qwen-ada=models/student/<time>/adapter --port 8000
-python -m src.llm.generate --role student --provider local --model qwen-ada --n 2000 --workers 8 --write-ifc
-```
-Results: `data/llm/*.jsonl` (every attempt, and the verified ones with their labels),
-IFC files in `data/synthetic/<role>/`.
-
-## 2. GNN agents
-
-```bash
-python -m src.agents.dataset                         # graphs + 70/15/15 split by IFC file
-python -m src.agents.train --agent door  --seeds 0 1 2
-python -m src.agents.train --agent room  --seeds 0 1 2
-python -m src.agents.train --agent route --conv transit --seeds 0 1 2   # route agent on the transit (line) graph
-```
-Models go to `models/`, metrics to `experiments/`.
-
-## 3. Main agent (LLM)
-
-Option 1, local Qwen 7B with [Ollama](https://ollama.com): `ollama pull qwen2.5:7b` (it serves
-`http://localhost:11434/v1`). Option 2, the fallback: set `OPENAI_API_KEY` for GPT-4.1-mini.
-Choose in `config/pipeline.yaml` (`provider: auto | local | openai | rule`).
-
-## 4. Check, evaluate, test, UI
-
-```bash
-python -m src.pipeline some.ifc                      # one file -> report
-python scripts/evaluate.py --provider rule           # test split; also: local / openai / auto, --agents oracle
-python scripts/test_real_ifc.py                      # the real IFC files in data/real/ (final test)
-# real files carry no ADA properties: the reader estimates what their geometry / standard IFC data
-# allows (config/derive.yaml, marked in the report); the rest is reported as "not checked"
-streamlit run app/streamlit_app.py                   # web UI: upload an IFC
-```
-
-## Useful tools
-
-```bash
-python tools/render_3d.py some.ifc picture.png       # 3D picture (report, slides)
-```
-
-## Folder layout
+## Layout
 
 ```
-ada-llm-gnn/
-├── config/
-│   ├── ada_rules.yaml       # every ADA threshold + the building verdict setting
-│   └── pipeline.yaml        # agent models, main agent (Qwen 7B / GPT-4.1-mini)
-├── prompts/                 # generation (system + user) and main agent prompts
-├── src/
-│   ├── ada/
-│   │   ├── rules.py         # rule engine: verification + labels (make_labels)
-│   │   ├── ifc_writer.py    # building JSON -> IFC
-│   │   ├── ifc_reader.py    # IFC -> building JSON (property sets + placement)
-│   │   ├── graph_builder.py # building -> NetworkX / PyG
-│   │   └── report.py        # verdict + findings -> report (Markdown)
-│   ├── llm/generate.py      # teacher / student generation + verification + SFT export
-│   ├── agents/
-│   │   ├── dataset.py       # records + IFC files -> graph dataset, split
-│   │   ├── models.py        # door / room / route agents
-│   │   ├── train.py         # agent training + metrics
-│   │   ├── gnn_agents.py    # run the trained agents -> findings (+ oracle)
-│   │   └── main_agent.py    # LLM main agent (+ fallback, + rule baseline)
-│   └── pipeline.py          # one IFC: read -> graph -> agents -> main agent -> report
-├── scripts/
-│   ├── demo_pipeline.py     # end-to-end demo on one building (no API)
-│   ├── evaluate.py          # evaluation on the synthetic test split
-│   └── test_real_ifc.py     # real IFC test
-├── app/streamlit_app.py     # web UI
-├── tools/render_3d.py       # IFC -> 3D picture
-├── tests/                   # rule engine, IFC round trip, leakage, generation, main agent, GNN
-├── data/{llm,synthetic,datasets,real}/   # not in git
-├── models/                  # trained agents (not in git)
-├── experiments/             # experiment results
-├── docs/figures/            # figures
-└── prototype/               # first prototype (old 3-class logic, reference only)
+config/       ADA limits, estimates for real files, agent / main-agent settings, LoRA settings
+prompts/      generation prompts, main-agent prompt, worked examples
+src/ada/      rule engine, IFC writer / reader, graph builder, report
+src/llm/      teacher / student generation and verification, student training
+src/agents/   data set, GNN agents (incl. transit graph), training, main agent, its training data
+scripts/      demo, evaluation, missing-data experiment, real-file test
+app/          Streamlit UI          tools/   3D view of an IFC file
+notebooks/    Colab: student, LLM main agent, fine-tuned main agent
+docs/paper/   the paper (LaTeX + PDF)
+tests/        180 tests
 ```
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The public IFC models used in the real-file test are not included and keep their
+own licenses.
