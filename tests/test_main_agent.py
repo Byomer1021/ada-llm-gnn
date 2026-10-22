@@ -122,6 +122,13 @@ def test_few_shot_messages_put_the_examples_before_the_building():
     assert few[0] == zero[0] and few[-1] == zero[-1]
 
 
+def test_a_building_without_rooms_is_not_checked():
+    """Real files without IfcSpace: "every room can be reached" must not make them accessible."""
+    from src.pipeline import check_building
+    with pytest.raises(ValueError, match="no rooms"):
+        check_building({"rooms": [], "doors": [], "issues": []}, agents="oracle", provider="rule")
+
+
 def test_both_options_down_raises():
     with pytest.raises(RuntimeError):
         decide(FINDINGS, "auto", load_config(),

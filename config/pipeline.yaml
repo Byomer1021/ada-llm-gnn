@@ -1,7 +1,10 @@
 # Settings of the accessibility check (GNN agents + main agent).
 
 agents:
-  models_dir: models        # door.pt, room.pt, route.pt written by src.agents.train
+  # door.pt, room.pt, route.pt written by src.agents.train. Since 22.10.2026: agents trained with
+  # missing values (--drop-frac 0.2; door 0.926, room 0.960, route 0.879; experiment E4). models/ =
+  # the earlier agents (no dropped values), which every run before that date used.
+  models_dir: models/missing
   threshold: 0.5            # probability >= threshold counts as "yes"
   # A value missing from the file (and not estimable): not_checked = the rule is not checked
   # (probability None, listed under "not checked"); infer = keep the agent's guess from the rest of

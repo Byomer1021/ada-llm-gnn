@@ -37,6 +37,8 @@ def get_agents(models_dir=None):
 def check_building(building: dict, agents: str = "gnn", provider: str | None = None, cfg: dict | None = None,
                    clients: dict | None = None) -> dict:
     cfg = cfg or load_config()
+    if not building["rooms"]:  # "every room can be reached" would hold for no rooms at all
+        raise ValueError("no rooms (IfcSpace) on the checked storey: the check needs the file's spaces")
     t0 = time.time()
     findings = oracle_findings(building) if agents == "oracle" else \
         run_agents(building, get_agents(ROOT / cfg["agents"]["models_dir"]),

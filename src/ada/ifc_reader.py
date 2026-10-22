@@ -167,16 +167,63 @@ def _bbox_xy(settings, element):
         return None
 
 
-def read_ifc(path: str, derive: bool = True) -> dict:
-    """derive=False: property sets only, no estimates (e.g. to measure what a file carries)."""
+def _storey(el):
+    """The building storey of a space (aggregated) or door (contained; else via the wall it fills), or None."""
+    s = uel.get_container(el) or uel.get_aggregate(el)
+    if s is None and el.is_a("IfcDoor") and getattr(el, "FillsVoids", None):
+        wall = el.FillsVoids[0].RelatingOpeningElement.VoidsElements[0].RelatingBuildingElement
+        s = uel.get_container(wall)
+    while s is not None and not s.is_a("IfcBuildingStorey"):
+        s = uel.get_aggregate(s)  # e.g. a space inside a zone / another space
+    return s
+
+
+def entrance_storey(model) -> tuple[object | None, str]:
+    """The storey to check (the scope is one storey), among the storeys with spaces: the LOWEST one
+    with an external door (Pset_DoorCommon.IsExternal; basements usually have none, and balcony
+    doors upstairs do not count against the ground floor), else the one nearest to elevation 0.
+    Tried on 20 ifc-bench files (22.10.2026): "most external doors" picked a balcony storey twice.
+    Files whose elevations are above sea level and carry no IsExternal (hitos) still get a wrong
+    storey: read_ifc(..., storey=<name>) then."""
+    storeys = model.by_type("IfcBuildingStorey")
+    if len(storeys) <= 1:
+        return (storeys[0] if storeys else None), "only storey"
+    with_spaces = Counter(_storey(sp) for sp in model.by_type("IfcSpace"))
+    cands = [s for s in storeys if with_spaces[s]] or storeys
+    ext = Counter(_storey(d) for d in model.by_type("IfcDoor")
+                  if uel.get_psets(d).get("Pset_DoorCommon", {}).get("IsExternal") is True)
+    with_ext = [s for s in cands if ext[s]]
+    if with_ext:
+        return min(with_ext, key=lambda s: s.Elevation or 0.0), "lowest storey with an external door"
+    return min(cands, key=lambda s: abs(s.Elevation or 0.0)), "nearest to elevation 0"
+
+
+def read_ifc(path: str, derive: bool = True, storey: str = "entrance") -> dict:
+    """derive=False: property sets only, no estimates (e.g. to measure what a file carries).
+    storey: "entrance" (default; the scope is one storey: entrance_storey()), "all" (every storey
+    in one plan, as before 22.10.2026: storeys then overlap), or a storey Name."""
     model = ifcopenshell.open(path)
     to_m = uunit.calculate_unit_scale(model)          # file length unit -> metres
     s = ifcopenshell.geom.settings()
     s.set("use-world-coords", True)
     issues = []
 
+    n_storeys = len(model.by_type("IfcBuildingStorey"))
+    if storey == "all":
+        chosen, how = None, "all storeys"
+    elif storey == "entrance":
+        chosen, how = entrance_storey(model)
+    else:
+        chosen = next((x for x in model.by_type("IfcBuildingStorey") if x.Name == storey), None)
+        how = "by name"
+        if chosen is None:
+            raise ValueError(f"no storey named {storey!r} in {path}")
+    keep = (lambda el: True) if chosen is None or n_storeys <= 1 else (lambda el: _storey(el) == chosen)
+    if chosen is not None and n_storeys > 1:
+        issues.append(f"{n_storeys} storeys: only '{chosen.Name}' is checked ({how}; the scope is one storey)")
+
     rooms, space_by_id = [], {}
-    spaces = model.by_type("IfcSpace")
+    spaces = [sp for sp in model.by_type("IfcSpace") if keep(sp)]
     for sp, rid in zip(spaces, _unique_ids([sp.Name or sp.GlobalId for sp in spaces])):
         bb = _bbox_xy(s, sp)
         ps = uel.get_psets(sp)
@@ -200,7 +247,7 @@ def read_ifc(path: str, derive: bool = True) -> dict:
             door_spaces.setdefault(el.id(), set()).add(space_by_id.get(sp.id()))
 
     doors = []
-    ifc_doors = model.by_type("IfcDoor")
+    ifc_doors = [d for d in model.by_type("IfcDoor") if keep(d)]
     for d, did in zip(ifc_doors, _unique_ids([d.Name or d.GlobalId for d in ifc_doors])):
         ps = uel.get_psets(d)
         bb = _bbox_xy(s, d)
@@ -237,7 +284,8 @@ def read_ifc(path: str, derive: bool = True) -> dict:
             continue
         doors.append(rec)
 
-    b = {"source": str(path), "unit_to_m": to_m, "rooms": rooms, "doors": doors, "issues": issues}
+    b = {"source": str(path), "unit_to_m": to_m, "rooms": rooms, "doors": doors, "issues": issues,
+         "storey": {"name": getattr(chosen, "Name", None), "how": how, "storeys_in_file": n_storeys}}
     if derive:
         estimate_missing(b)
     for el, keys in [(r, ROOM_KEYS) for r in rooms] + [(d, DOOR_KEYS) for d in doors]:

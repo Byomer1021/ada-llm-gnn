@@ -45,6 +45,30 @@ def test_roundtrip_every_orientation(tmp_path, d2_wall):
     assert evaluate(back, RULES)["labels"]["R2"] == "not_reachable"
 
 
+def test_only_the_entrance_storey_is_read(tmp_path):
+    """Scope is one storey: a second storey's rooms must not land in the same plan."""
+    import ifcopenshell
+    import ifcopenshell.api.aggregate
+    import ifcopenshell.api.root
+    p = tmp_path / "b.ifc"
+    write_ifc(SCENARIOS[0][1], str(p))
+    m = ifcopenshell.open(str(p))
+    ground = m.by_type("IfcBuildingStorey")[0]
+    upper = ifcopenshell.api.root.create_entity(m, ifc_class="IfcBuildingStorey", name="First floor")
+    upper.Elevation = 3.0
+    ifcopenshell.api.aggregate.assign_object(m, relating_object=m.by_type("IfcBuilding")[0], products=[upper])
+    ifcopenshell.api.aggregate.assign_object(m, relating_object=upper, products=[
+        ifcopenshell.api.root.create_entity(m, ifc_class="IfcSpace", name="R9")])
+    m.write(str(p))
+    back = read_ifc(str(p))
+    assert sorted(r["id"] for r in back["rooms"]) == ["R1", "R2"] and len(back["doors"]) == 2
+    assert back["storey"]["name"] == ground.Name and back["storey"]["how"] == "lowest storey with an external door"
+    assert any("2 storeys" in i for i in back["issues"])
+    assert "R9" in [r["id"] for r in read_ifc(str(p), storey="all")["rooms"]]
+    assert [r["id"] for r in read_ifc(str(p), storey="First floor")["rooms"]] == ["R9"]
+    assert evaluate(back, RULES)["verdict"]["label"] == "accessible"  # "all ok", unchanged by the upper storey
+
+
 def test_repeated_names_stay_separate(tmp_path):
     """Real files repeat Names (ArchiCAD: 14 doors called 'Tür-005'); no door may replace another."""
     import ifcopenshell
