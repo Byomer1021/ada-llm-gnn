@@ -8,7 +8,9 @@ Score the whole check (3 GNN agents + main agent) on the TEST split of the synth
     python scripts/evaluate.py --limit 20                 # quick try (LLM calls cost time / money)
     # a hosted model in the main agent's "local" slot (e.g. the NVIDIA API, same key as the teacher)
     python scripts/evaluate.py --provider local --llm-url https://integrate.api.nvidia.com/v1 \
-        --llm-model mistralai/mistral-7b-instruct-v0.3 --llm-key-env NVIDIA_API_KEY --workers 4
+        --llm-model openai/gpt-oss-20b --llm-key-env NVIDIA_API_KEY --max-tokens 4000 --timeout 300 --workers 4
+    # same, asking again only where that run's answer was invalid (timeouts); the result goes to a new run
+    python scripts/evaluate.py <same LLM options> --retry-invalid <experiments/run name>
 
 Metrics (success criterion: main agent's verdict macro F1 >= 0.90 on unseen buildings):
   building verdict: accuracy, macro F1, F1 per class, confusion matrix,
@@ -40,13 +42,25 @@ from src.pipeline import get_agents  # noqa: E402
 LABELS = ["accessible", "not_accessible"]
 
 
+def previous_run(name: str):
+    """A finished evaluation: its predictions as (record, findings) items + decisions, and its metrics."""
+    src = Path(name)
+    if not src.is_dir():
+        src = ROOT / "experiments" / name
+    prev = [json.loads(x) for x in (src / "predictions.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    items = [({"id": q["id"], "labels": {"verdict": q["truth"]}}, q["findings"]) for q in prev]
+    return src, items, [q["decision"] for q in prev], json.loads((src / "metrics.json").read_text(encoding="utf-8"))
+
+
 def main(a):
-    split = json.loads((ROOT / "data" / "datasets" / "split.json").read_text(encoding="utf-8"))
-    test_ids = set(split["test"])
-    recs = [(role, r) for role, r in records(a.sources) if r["id"] in test_ids]
-    if a.limit:
-        recs = recs[:a.limit]
     cfg = load_config()
+    if a.retry_invalid:
+        # same buildings and the same stored findings; only the main agent is asked again, and only where
+        # its answer was invalid (e.g. a timeout). Settings the findings depend on come from that run.
+        src, items, decisions, pm = previous_run(a.retry_invalid)
+        a.agents = pm["agents"]
+        cfg["agents"]["models_dir"] = pm["models_dir"]
+        cfg["main_agent"]["reachability"] = a.reachability or pm["reachability"]
     if a.reachability:
         cfg["main_agent"]["reachability"] = a.reachability
     if a.models_dir:
@@ -62,16 +76,27 @@ def main(a):
     who = a.provider or "config"
     if a.provider == "local":
         who += "_" + loc["model"].split("/")[-1]
-    out = ROOT / "experiments" / f"{time.strftime('%Y%m%d_%H%M%S')}_eval_{a.agents}_{who}_{reach}"
+    out = ROOT / "experiments" / (f"{time.strftime('%Y%m%d_%H%M%S')}_eval_{a.agents}_{who}_{reach}"
+                                  + ("_retry" if a.retry_invalid else ""))
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. the agents' findings, one building after the other (fast, CPU)
-    agents = None if a.agents == "oracle" else get_agents(ROOT / cfg["agents"]["models_dir"])
-    items = []
-    for role, r in recs:
-        b, _ = load_building(role, r, from_json=False)
-        items.append((r, oracle_findings(b) if agents is None else run_agents(b, agents)))
-    print(f"findings for {len(items)} buildings; main agent: {who}")
+    if a.retry_invalid:
+        todo = [i for i, d in enumerate(decisions) if d["label"] == "invalid"]
+        print(f"{src.name}: {len(todo)} of {len(items)} answers invalid, asking again; main agent: {who}")
+    else:
+        # 1. the agents' findings, one building after the other (fast, CPU)
+        split = json.loads((ROOT / "data" / "datasets" / "split.json").read_text(encoding="utf-8"))
+        test_ids = set(split["test"])
+        recs = [(role, r) for role, r in records(a.sources) if r["id"] in test_ids]
+        if a.limit:
+            recs = recs[:a.limit]
+        agents = None if a.agents == "oracle" else get_agents(ROOT / cfg["agents"]["models_dir"])
+        items = []
+        for role, r in recs:
+            b, _ = load_building(role, r, from_json=False)
+            items.append((r, oracle_findings(b) if agents is None else run_agents(b, agents)))
+        decisions, todo = [None] * len(items), list(range(len(items)))
+        print(f"findings for {len(items)} buildings; main agent: {who}")
 
     # 2. the main agent's decisions; LLM calls go out --workers at a time. An answer that stays
     #    invalid after the retries is kept as label "invalid" and counts as wrong, never dropped.
@@ -83,7 +108,8 @@ def main(a):
                     "provider": "failed", "error": f"{e.__class__.__name__}: {e}"[:400], "not_checked": []}
 
     with ThreadPoolExecutor(max_workers=max(1, a.workers)) as ex:
-        decisions = list(ex.map(one, items))
+        for i, d in zip(todo, ex.map(one, [items[i] for i in todo])):
+            decisions[i] = d
 
     y, p, tp, fp, fn, exact, used = [], [], 0, 0, 0, 0, Counter()
     with open(out / "predictions.jsonl", "w", encoding="utf-8") as f:
@@ -98,7 +124,7 @@ def main(a):
             used[d["provider"]] += 1
             f.write(json.dumps({"id": r["id"], "truth": truth, "decision": d, "findings": findings},
                                ensure_ascii=False) + "\n")
-            print(f"[{i}/{len(recs)}] {r['id']}: truth {truth['label']}, predicted {d['label']}"
+            print(f"[{i}/{len(items)}] {r['id']}: truth {truth['label']}, predicted {d['label']}"
                   + ("" if truth["label"] == d["label"] else "   <-- wrong"))
     majority = Counter(y).most_common(1)[0][0]
     prec, rec = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
@@ -116,6 +142,9 @@ def main(a):
         "failing_rules": {"precision": prec, "recall": rec, "f1": 2 * prec * rec / max(prec + rec, 1e-9),
                           "exact_match": exact / max(len(y), 1)},
     }
+    if a.retry_invalid:
+        m["retried_from"] = {"run": src.name, "asked_again": len(todo),
+                             "still_invalid": sum(decisions[i]["label"] == "invalid" for i in todo)}
     (out / "metrics.json").write_text(json.dumps(m, indent=1), encoding="utf-8")
     print(json.dumps(m, indent=1))
     print(f"saved {out}")
@@ -137,4 +166,7 @@ if __name__ == "__main__":
     ap.add_argument("--max-tokens", type=int, default=None, help="main agent answer limit (reasoning models need more)")
     ap.add_argument("--workers", type=int, default=1, help="main agent calls at the same time")
     ap.add_argument("--timeout", type=float, default=None, help="seconds per main agent call (reasoning models are slow)")
+    ap.add_argument("--retry-invalid", default=None, metavar="RUN",
+                    help="experiments/RUN: keep its valid answers, ask the main agent again only where the answer was "
+                         "invalid (same stored findings), write the merged result to a new run")
     main(ap.parse_args())
