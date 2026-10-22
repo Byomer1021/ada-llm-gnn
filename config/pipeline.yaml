@@ -3,6 +3,10 @@
 agents:
   models_dir: models        # door.pt, room.pt, route.pt written by src.agents.train
   threshold: 0.5            # probability >= threshold counts as "yes"
+  # A value missing from the file (and not estimable): not_checked = the rule is not checked
+  # (probability None, listed under "not checked"); infer = keep the agent's guess from the rest of
+  # the building (listed under "inferred"). Compared in experiment E4 (scripts/missing_data.py).
+  missing_values: not_checked
 
 main_agent:
   # auto   = try the local Qwen 7B first; if it is not running or gives invalid JSON twice,

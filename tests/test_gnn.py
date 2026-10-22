@@ -74,6 +74,50 @@ def test_input_norm_standardises_values_only():
     assert bool((model.norm(a)[2][:, 0] <= model.norm(b)[2][:, 0]).all())
 
 
+def test_input_norm_turns_a_missing_value_into_zero():
+    """Not the training minimum: a missing door width must not look like the narrowest door."""
+    graphs = [data_of(b) for name, b, _ in SCENARIOS if "missing" not in name]
+    model = build_agent("door")
+    model.norm.fit(graphs)
+    g = graphs[0].clone()
+    g.door_attr = g.door_attr.clone()
+    g.door_attr[0, 0], g.door_attr[0, 5] = 0.0, 1.0  # D1: clear width missing
+    d = model.norm(g)[2]
+    assert d[0, 0] == 0 and d[0, 5] == 1
+    assert torch.equal(d[1], model.norm(graphs[0])[2][1])  # the other door is unchanged
+
+
+def test_drop_values_masks_a_door_the_same_everywhere():
+    from torch_geometric.loader import DataLoader
+    from src.agents.train import drop_values
+    graphs = [data_of(b) for name, b, _ in SCENARIOS if "missing" not in name]
+    batch = next(iter(DataLoader(graphs, batch_size=len(graphs))))
+    out = drop_values(batch, 0.5, torch.Generator().manual_seed(0))
+    m = out.door_attr[:, 5:10]
+    assert 0 < m.sum() < m.numel()
+    assert torch.equal(out.edge_attr[:, 5:10], m.repeat_interleave(2, 0))  # both directions of a door
+    assert torch.equal(out.door_attr[:, :5] * m, torch.zeros_like(m))    # a dropped value is 0
+    keep = m == 0
+    assert torch.equal(out.door_attr[:, :5][keep], batch.door_attr[:, :5][keep])
+    assert torch.equal(out.x[:, :2], batch.x[:, :2])                     # room width / length never
+    ext = batch.x[:, -1] == 1
+    assert torch.equal(out.x[ext], batch.x[ext])                         # EXTERIOR untouched
+    assert torch.equal(out.door_y, batch.door_y)                         # targets of the full building
+    assert float(batch.door_attr[:, 5:10].sum()) == 0                    # the input batch is not changed
+
+
+def test_run_agents_missing_value_not_checked_or_inferred():
+    from tests.test_rules import two_rooms
+    b = two_rooms()
+    next(d for d in b["doors"] if d["id"] == "D2")["clear_width_mm"] = None
+    agents = {a: build_agent(a).eval() for a in ("door", "room", "route")}
+    nc = {d["id"]: d for d in run_agents(b, agents)["doors"]}["D2"]
+    inf = {d["id"]: d for d in run_agents(b, agents, missing="infer")["doors"]}["D2"]
+    assert nc["fail_prob"]["ADA 404.2.3"] is None and nc["not_checked"] == ["ADA 404.2.3"] and "inferred" not in nc
+    assert inf["fail_prob"]["ADA 404.2.3"] is not None and inf["not_checked"] == []
+    assert inf["inferred"] == ["ADA 404.2.3"] and inf["fail_prob"]["ADA 404.2.5"] == nc["fail_prob"]["ADA 404.2.5"]
+
+
 def test_quantile_norm_ranks_clamps_and_keeps_order():
     graphs = [data_of(b) for name, b, _ in SCENARIOS if "missing" not in name]
     model = build_agent("door", norm="quantile")

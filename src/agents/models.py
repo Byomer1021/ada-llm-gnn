@@ -45,7 +45,11 @@ class InputNorm(nn.Module):
     mean / std -> 0.68 / 0.67 / 0.84; a quantile (rank) transform -> 0.61 / 0.77 / 0.78.
     The clamp keeps the one real advantage of the ranks: values outside the training range
     (real files: a 7110 mm clearance) are not extrapolated by the network.
-    Fitted once in train.py; the statistics are buffers, saved in the checkpoint."""
+    Fitted once in train.py; the statistics are buffers, saved in the checkpoint.
+    A missing value (0 + its flag) becomes 0 after scaling, i.e. the training mean, and the flag
+    says it is missing. (Until 22.10.2026 it was clamped to the training MINIMUM, so a missing door
+    width looked like the narrowest door; the synthetic data never has missing values, so no
+    result before E4 changed. Same weights, so no MODEL_VERSION bump.)"""
 
     def __init__(self):
         super().__init__()
@@ -76,12 +80,14 @@ class InputNorm(nn.Module):
         stats("d", torch.cat([g.door_attr for g in graphs]), ev)
         return self
 
-    def _scale(self, t, name):
+    def _scale(self, t, name, n):
         mean, std, lo, hi = (getattr(self, f"{name}_{s}") for s in ("mean", "std", "lo", "hi"))
-        return (torch.minimum(torch.maximum(t, lo), hi) - mean) / std
+        out = (torch.minimum(torch.maximum(t, lo), hi) - mean) / std
+        return torch.cat([out[:, :n] * (1 - t[:, n:2 * n]), out[:, n:]], 1)  # missing value -> 0
 
     def forward(self, data):
-        return self._scale(data.x, "x"), self._scale(data.edge_attr, "e"), self._scale(data.door_attr, "d")
+        nv, ev = len(NODE_FEATURES), len(EDGE_FEATURES)
+        return self._scale(data.x, "x", nv), self._scale(data.edge_attr, "e", ev), self._scale(data.door_attr, "d", ev)
 
 
 class QuantileNorm(nn.Module):

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.agents.models import AGENTS, CONVS, MODEL_VERSION, ROUTE_ONLY, build_agent, targets  # noqa: E402
-from src.ada.graph_builder import FEATURE_VERSION  # noqa: E402
+from src.ada.graph_builder import EDGE_FEATURES, FEATURE_VERSION, NODE_FEATURES  # noqa: E402
 from src.ada.rules import DOOR_RULES  # noqa: E402
 
 DATA = ROOT / "data" / "datasets"
@@ -116,6 +116,24 @@ def building_macro_f1(model, graphs, thr=0.5):
     return macro(ys, ps)
 
 
+def drop_values(data, frac: float, gen: torch.Generator):
+    """Training augmentation for missing values (E4): every measured value of a (batched) graph is
+    missing with probability `frac` (value 0, missing flag 1; a door the same in both directions and
+    in door_attr). Room width / length are geometry, always in a file, so only the turning space of
+    a room is dropped. Targets stay those of the complete building: the agent has to guess from the
+    rest of the building."""
+    d = data.clone()
+    nv, ev = len(NODE_FEATURES), len(EDGE_FEATURES)
+    m = (torch.rand(d.door_attr.shape[0], ev, generator=gen) < frac).float()
+    for t, mm in ((d.door_attr, m), (d.edge_attr, m.repeat_interleave(2, 0))):  # door i = edges 2i, 2i + 1
+        t[:, :ev] *= 1 - mm
+        t[:, ev:2 * ev] = torch.maximum(t[:, ev:2 * ev], mm)
+    j = NODE_FEATURES.index("turning_space_diameter_mm")
+    room = (d.x[:, -1] == 0) & (torch.rand(d.x.shape[0], generator=gen) < frac)
+    d.x[room, j], d.x[room, nv + j] = 0.0, 1.0
+    return d
+
+
 def pos_weight(agent, graphs):
     y = torch.cat([targets(agent, g)[0][targets(agent, g)[1]].view(-1, 4 if agent == "door" else 1) for g in graphs])
     pos = y.sum(0)
@@ -133,9 +151,12 @@ def train_one(agent, conv, seed, sets, args):
     best, best_state, bad = -1.0, None, 0
     loader = DataLoader(sets["train"], batch_size=args.batch, shuffle=True,
                         generator=torch.Generator().manual_seed(seed))
+    drop_gen = torch.Generator().manual_seed(1000 + seed)
     for epoch in range(args.epochs):
         model.train()
         for data in loader:
+            if args.drop_frac:
+                data = drop_values(data, args.drop_frac, drop_gen)
             y, mask = targets(agent, data)
             out = model(data)
             loss = loss_fn(out[mask].view(-1, 4) if agent == "door" else out[mask],
@@ -181,7 +202,7 @@ def main(args):
     print("  test at 0.5:        " + ", ".join(f"{k} {v['mean']:.3f}+-{v['std']:.3f}" for k, v in summary05.items()))
     cfg = {"agent": args.agent, "conv": args.conv, "hidden": args.hidden, "feature_version": FEATURE_VERSION,
            "model_version": MODEL_VERSION, "layers": args.layers or (2 if args.agent == "door" else 4),
-           "norm": args.norm}
+           "norm": args.norm, "drop_frac": args.drop_frac}
     out = ROOT / "experiments" / f"{time.strftime('%Y%m%d_%H%M%S')}_{args.agent}_{args.conv}"
     out.mkdir(parents=True, exist_ok=True)
     (out / "metrics.json").write_text(json.dumps({"config": cfg | vars(args), "runs": runs, "summary": summary,
@@ -211,4 +232,7 @@ if __name__ == "__main__":
     ap.add_argument("--patience", type=int, default=40)
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--models-dir", default="models")
+    ap.add_argument("--drop-frac", type=float, default=0.0,
+                    help="E4: each measured value is missing with this probability in every training batch "
+                         "(validation / test stay complete)")
     main(ap.parse_args())

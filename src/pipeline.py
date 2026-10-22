@@ -39,7 +39,8 @@ def check_building(building: dict, agents: str = "gnn", provider: str | None = N
     cfg = cfg or load_config()
     t0 = time.time()
     findings = oracle_findings(building) if agents == "oracle" else \
-        run_agents(building, get_agents(ROOT / cfg["agents"]["models_dir"]))
+        run_agents(building, get_agents(ROOT / cfg["agents"]["models_dir"]),
+                   missing=cfg["agents"].get("missing_values", "not_checked"))
     decision = decide(findings, provider=provider, cfg=cfg, clients=clients)
     return {"building": building, "findings": findings, "decision": decision,
             "report": make_report(building, decision, findings), "seconds": round(time.time() - t0, 2)}

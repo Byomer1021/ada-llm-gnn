@@ -18,8 +18,10 @@ FINDINGS FORMAT (input of the main agent, also shown in the report)
 Probabilities are rescaled so that each agent's own threshold (chosen on the validation split,
 saved in the checkpoint) sits at 0.5: ">= 0.5" means "yes" for every agent and rule.
 A rule whose value is not in the file (and could not be estimated) gets probability None and is
-listed in not_checked (config/ada_rules.yaml: missing_values.policy "not_checked"); there is
-nothing to predict it from. "estimated": values the IFC reader estimated (config/derive.yaml).
+listed in not_checked (config/ada_rules.yaml: missing_values.policy "not_checked"). With
+missing="infer" (config/pipeline.yaml: agents.missing_values; experiment E4) the agent's own guess
+from the rest of the building is kept instead and the rule is listed in "inferred" (that key only
+exists in this mode). "estimated": values the IFC reader estimated (config/derive.yaml).
 
 `oracle_findings()` builds the same format from the rule engine (probabilities 0 / 1).
 It is ONLY for testing the main agent and the UI before the GNNs are trained, and as an
@@ -91,24 +93,27 @@ def _values(obj: dict, keys: list[str]) -> dict:
     return {k: obj.get(k) for k in keys}
 
 
-def _door(d: dict, probs: dict, rules: dict, rooms: dict) -> dict:
+def _door(d: dict, probs: dict, rules: dict, rooms: dict, infer: bool = False) -> dict:
     """rooms: id -> room dict, for the wall each connected room has the door on (geometry, as in the graph)."""
     nc = _unchecked(d, rules)
-    return {"id": d["id"], "connects": d["connects"], "values": _values(d, EDGE_FEATURES),
-            "fail_prob": {r: None if r in nc else round(p, 3) for r, p in probs.items()},
-            "walls": {rid: door_side(d, rooms[rid], rules) or "?" for rid in d["connects"] if rid in rooms},
-            "not_checked": nc, "estimated": d.get("estimated", {})}
+    out = {"id": d["id"], "connects": d["connects"], "values": _values(d, EDGE_FEATURES),
+           "fail_prob": {r: None if r in nc and not infer else round(p, 3) for r, p in probs.items()},
+           "walls": {rid: door_side(d, rooms[rid], rules) or "?" for rid in d["connects"] if rid in rooms},
+           "not_checked": [] if infer else nc, "estimated": d.get("estimated", {})}
+    return out | ({"inferred": nc} if infer else {})
 
 
-def _room(r: dict, turn_p: float, reach_p: float, rules: dict) -> dict:
+def _room(r: dict, turn_p: float, reach_p: float, rules: dict, infer: bool = False) -> dict:
     nc = _unchecked(r, rules)
-    return {"id": r["id"], "values": _values(r, NODE_FEATURES),
-            "turning_fail_prob": None if nc else round(turn_p, 3), "reachable_prob": round(reach_p, 3),
-            "not_checked": nc, "estimated": r.get("estimated", {})}
+    out = {"id": r["id"], "values": _values(r, NODE_FEATURES),
+           "turning_fail_prob": None if nc and not infer else round(turn_p, 3), "reachable_prob": round(reach_p, 3),
+           "not_checked": [] if infer else nc, "estimated": r.get("estimated", {})}
+    return out | ({"inferred": nc} if infer else {})
 
 
-def run_agents(building: dict, agents: dict, rules: dict | None = None) -> dict:
-    """Three GNN agents (in parallel, independent of each other) -> findings."""
+def run_agents(building: dict, agents: dict, rules: dict | None = None, missing: str = "not_checked") -> dict:
+    """Three GNN agents (in parallel, independent of each other) -> findings.
+    missing: "not_checked" (a rule whose value is missing gets None) or "infer" (the agent's guess)."""
     import torch
 
     rules = rules or load_rules()
@@ -125,9 +130,10 @@ def run_agents(building: dict, agents: dict, rules: dict | None = None) -> dict:
     reach_p = [rescale(p, thr["route"]) for p in reach_p]
     doors_by_id = {d["id"]: d for d in building["doors"]}
     rooms_by_id = {r["id"]: r for r in building["rooms"]}
-    doors = [_door(doors_by_id[did], dict(zip(DOOR_RULES, door_p[i])), rules, rooms_by_id)
+    infer = missing == "infer"
+    doors = [_door(doors_by_id[did], dict(zip(DOOR_RULES, door_p[i])), rules, rooms_by_id, infer)
              for i, did in enumerate(data.door_ids)]
-    rooms = [_room(rooms_by_id[n], turn_p[i], reach_p[i], rules)
+    rooms = [_room(rooms_by_id[n], turn_p[i], reach_p[i], rules, infer)
              for i, n in enumerate(data.node_names) if n != EXTERIOR]
     return {"source": "gnn", "doors": doors, "rooms": rooms, "data_issues": building.get("issues", [])}
 
