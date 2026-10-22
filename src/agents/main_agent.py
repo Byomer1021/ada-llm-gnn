@@ -36,6 +36,9 @@ from src.ada.rules import ACCESSIBLE, DOOR_RULES, EXTERIOR, NOT_ACCESSIBLE, OPPO
 PASSAGE_RULE = "ADA 403.5.1"
 
 SYSTEM_PROMPT = (ROOT / "prompts" / "main_agent_system.txt").read_text(encoding="utf-8")
+# hand-made buildings (never from the data) with the expected answer; sent before the real findings
+# when main_agent.few_shot is on
+EXAMPLES = ROOT / "prompts" / "main_agent_examples.json"
 CONFIG = ROOT / "config" / "pipeline.yaml"
 KNOWN_RULES = set(DOOR_RULES) | {ROOM_RULE, PASSAGE_RULE}
 
@@ -193,14 +196,25 @@ def _client(opt: dict, timeout: float):
     return OpenAI(base_url=opt.get("base_url"), api_key=key, timeout=timeout, max_retries=1)
 
 
+def messages(findings: dict, few_shot: bool = False) -> list[dict]:
+    """System prompt, optionally the worked examples as earlier turns, then the building's findings."""
+    user = lambda f: "Findings of the three agents:\n" + json.dumps(f, ensure_ascii=False, indent=1)
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if few_shot:
+        for ex in json.loads(EXAMPLES.read_text(encoding="utf-8")):
+            msgs += [{"role": "user", "content": user(ex["findings"])},
+                     {"role": "assistant", "content": json.dumps(ex["answer"], ensure_ascii=False, indent=1)}]
+    return msgs + [{"role": "user", "content": user(findings)}]
+
+
 def llm_decide(findings: dict, opt: dict, cfg: dict, client=None, tries: int = 2) -> dict:
     client = client or _client(opt, cfg.get("timeout_s", 120))
-    user = "Findings of the three agents:\n" + json.dumps(findings, ensure_ascii=False, indent=1)
+    msgs = messages(findings, cfg.get("few_shot", False))
     last = None
     for _ in range(tries):
         resp = client.chat.completions.create(
             model=opt["model"], temperature=cfg.get("temperature", 0), max_tokens=cfg.get("max_tokens", 1500),
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}])
+            messages=msgs)
         try:
             return _parse(resp.choices[0].message.content)
         except (ValueError, json.JSONDecodeError) as e:

@@ -1,0 +1,126 @@
+[
+ {
+  "case": "the last room cannot turn around: only a warning, the building stays accessible",
+  "findings": {
+   "source": "gnn",
+   "doors": [
+    {"id": "D1", "connects": ["EXTERIOR", "R1"],
+     "values": {"clear_width_mm": 910.0, "threshold_height_mm": 6.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 4200.0, "maneuvering_push_mm": 6000.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.01},
+     "walls": {"R1": "S"}, "not_checked": [], "estimated": {}},
+    {"id": "D2", "connects": ["R1", "R2"],
+     "values": {"clear_width_mm": 880.0, "threshold_height_mm": 10.0, "hardware_height_mm": 950.0,
+                "maneuvering_pull_mm": 3100.0, "maneuvering_push_mm": 4200.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "N", "R2": "S"}, "not_checked": [], "estimated": {}}
+   ],
+   "rooms": [
+    {"id": "R1", "values": {"width_mm": 3600.0, "length_mm": 4200.0, "turning_space_diameter_mm": 1700.0},
+     "turning_fail_prob": 0.0, "reachable_prob": 1.0, "not_checked": [], "estimated": {}},
+    {"id": "R2", "values": {"width_mm": 3200.0, "length_mm": 3100.0, "turning_space_diameter_mm": 1300.0},
+     "turning_fail_prob": 0.99, "reachable_prob": 0.97, "not_checked": [], "estimated": {}}
+   ],
+   "data_issues": []
+  },
+  "answer": {
+   "label": "accessible",
+   "failing_rules": [],
+   "warnings": ["R2: turning space 1300 mm < 1525 mm (ADA 304.3.1), can be entered but not turned in"],
+   "explanation": "Path: EXTERIOR through D1 (passes every door rule) into R1, then through D2 (passes) into R2, so every room can be reached. R2's turning space fails ADA 304.3.1, but R2 is the last room and blocks no other room, so it is only a warning."
+  }
+ },
+ {
+  "case": "a room that cannot turn around, its doors on ADJACENT walls: the room behind it cannot be reached",
+  "findings": {
+   "source": "gnn",
+   "doors": [
+    {"id": "D1", "connects": ["EXTERIOR", "R1"],
+     "values": {"clear_width_mm": 900.0, "threshold_height_mm": 10.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 3800.0, "maneuvering_push_mm": 6000.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "S"}, "not_checked": [], "estimated": {}},
+    {"id": "D2", "connects": ["R1", "R2"],
+     "values": {"clear_width_mm": 915.0, "threshold_height_mm": 5.0, "hardware_height_mm": 1050.0,
+                "maneuvering_pull_mm": 2900.0, "maneuvering_push_mm": 4000.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "E", "R2": "W"}, "not_checked": [], "estimated": {}}
+   ],
+   "rooms": [
+    {"id": "R1", "values": {"width_mm": 2900.0, "length_mm": 3800.0, "turning_space_diameter_mm": 1180.0},
+     "turning_fail_prob": 1.0, "reachable_prob": 1.0, "not_checked": [], "estimated": {}},
+    {"id": "R2", "values": {"width_mm": 4000.0, "length_mm": 4500.0, "turning_space_diameter_mm": 1650.0},
+     "turning_fail_prob": 0.0, "reachable_prob": 0.03, "not_checked": [], "estimated": {}}
+   ],
+   "data_issues": []
+  },
+  "answer": {
+   "label": "not_accessible",
+   "failing_rules": [{"element": "R1", "rule": "ADA 304.3.1"}],
+   "warnings": [],
+   "explanation": "Path: EXTERIOR through D1 (passes) into R1. R1's turning space fails ADA 304.3.1 (1180 mm < 1525 mm) and its doors are on ADJACENT walls (D1 on S, D2 on E), so going on to D2 needs a 90-degree turn: R2 cannot be reached, although D2 itself passes. The route agent agrees (R2: 0.03)."
+  }
+ },
+ {
+  "case": "a room that cannot turn around, its doors on OPPOSITE walls: crossed in a straight line; the route agent is wrong",
+  "findings": {
+   "source": "gnn",
+   "doors": [
+    {"id": "D1", "connects": ["EXTERIOR", "R1"],
+     "values": {"clear_width_mm": 870.0, "threshold_height_mm": 12.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 4400.0, "maneuvering_push_mm": 6000.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.02, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "W"}, "not_checked": [], "estimated": {}},
+    {"id": "D2", "connects": ["R1", "R2"],
+     "values": {"clear_width_mm": 900.0, "threshold_height_mm": 10.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 3900.0, "maneuvering_push_mm": 4400.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "E", "R2": "W"}, "not_checked": [], "estimated": {}}
+   ],
+   "rooms": [
+    {"id": "R1", "values": {"width_mm": 4400.0, "length_mm": 3300.0, "turning_space_diameter_mm": 1250.0},
+     "turning_fail_prob": 0.98, "reachable_prob": 1.0, "not_checked": [], "estimated": {}},
+    {"id": "R2", "values": {"width_mm": 3900.0, "length_mm": 4600.0, "turning_space_diameter_mm": 1800.0},
+     "turning_fail_prob": 0.0, "reachable_prob": 0.22, "not_checked": [], "estimated": {}}
+   ],
+   "data_issues": []
+  },
+  "answer": {
+   "label": "accessible",
+   "failing_rules": [],
+   "warnings": ["R1: turning space 1250 mm < 1525 mm (ADA 304.3.1), can be entered but not turned in"],
+   "explanation": "Path: EXTERIOR through D1 (passes) into R1. R1 cannot turn around (ADA 304.3.1), but D1 is on its W wall and D2 on its E wall, opposite walls, and R1 is 3300 mm across (>= 915 mm, ADA 403.5.1), so a wheelchair crosses R1 in a straight line and passes D2 into R2. Every room can be reached. The route agent disagrees on R2 (0.22); the traced path is trusted."
+  }
+ },
+ {
+  "case": "a failing door on the way: the room behind it cannot be reached",
+  "findings": {
+   "source": "gnn",
+   "doors": [
+    {"id": "D1", "connects": ["EXTERIOR", "R1"],
+     "values": {"clear_width_mm": 920.0, "threshold_height_mm": 8.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 4100.0, "maneuvering_push_mm": 6000.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.0},
+     "walls": {"R1": "E"}, "not_checked": [], "estimated": {}},
+    {"id": "D2", "connects": ["R1", "R2"],
+     "values": {"clear_width_mm": 890.0, "threshold_height_mm": 10.0, "hardware_height_mm": 1000.0,
+                "maneuvering_pull_mm": 1490.0, "maneuvering_push_mm": 2900.0},
+     "fail_prob": {"ADA 404.2.3": 0.0, "ADA 404.2.5": 0.0, "ADA 404.2.7": 0.0, "ADA 404.2.4": 0.96},
+     "walls": {"R1": "S", "R2": "N"}, "not_checked": [], "estimated": {}}
+   ],
+   "rooms": [
+    {"id": "R1", "values": {"width_mm": 4100.0, "length_mm": 3500.0, "turning_space_diameter_mm": 1600.0},
+     "turning_fail_prob": 0.0, "reachable_prob": 1.0, "not_checked": [], "estimated": {}},
+    {"id": "R2", "values": {"width_mm": 4100.0, "length_mm": 3000.0, "turning_space_diameter_mm": 1700.0},
+     "turning_fail_prob": 0.0, "reachable_prob": 0.05, "not_checked": [], "estimated": {}}
+   ],
+   "data_issues": []
+  },
+  "answer": {
+   "label": "not_accessible",
+   "failing_rules": [{"element": "D2", "rule": "ADA 404.2.4"}],
+   "warnings": [],
+   "explanation": "Path: EXTERIOR through D1 (passes) into R1, which can turn around. D2 fails ADA 404.2.4: its pull-side maneuvering clearance is 1490 mm < 1525 mm (door agent: 0.96), so R2 cannot be reached. The route agent agrees (R2: 0.05)."
+  }
+ }
+]

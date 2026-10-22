@@ -61,6 +61,9 @@ def main(a):
         a.agents = pm["agents"]
         cfg["agents"]["models_dir"] = pm["models_dir"]
         cfg["main_agent"]["reachability"] = a.reachability or pm["reachability"]
+        a.few_shot = pm.get("few_shot", False)
+    if a.few_shot:
+        cfg["main_agent"]["few_shot"] = True
     if a.reachability:
         cfg["main_agent"]["reachability"] = a.reachability
     if a.models_dir:
@@ -76,6 +79,9 @@ def main(a):
     who = a.provider or "config"
     if a.provider == "local":
         who += "_" + loc["model"].split("/")[-1]
+    few_shot = cfg["main_agent"].get("few_shot", False) and a.provider != "rule"
+    if few_shot:
+        who += "_fewshot"
     out = ROOT / "experiments" / (f"{time.strftime('%Y%m%d_%H%M%S')}_eval_{a.agents}_{who}_{reach}"
                                   + ("_retry" if a.retry_invalid else ""))
     out.mkdir(parents=True, exist_ok=True)
@@ -132,6 +138,7 @@ def main(a):
         "n": len(y), "agents": a.agents, "provider": a.provider or "config", "reachability": reach,
         "models_dir": cfg["agents"]["models_dir"],
         "llm": {k: loc[k] for k in ("base_url", "model")} if a.provider in ("local", "auto") else None,
+        "few_shot": few_shot,
         "providers_used": dict(used), "invalid_answers": p.count("invalid"),
         "accuracy": accuracy_score(y, p),
         "macro_f1": f1_score(y, p, average="macro", labels=LABELS, zero_division=0),
@@ -166,6 +173,8 @@ if __name__ == "__main__":
     ap.add_argument("--max-tokens", type=int, default=None, help="main agent answer limit (reasoning models need more)")
     ap.add_argument("--workers", type=int, default=1, help="main agent calls at the same time")
     ap.add_argument("--timeout", type=float, default=None, help="seconds per main agent call (reasoning models are slow)")
+    ap.add_argument("--few-shot", action="store_true",
+                    help="LLM main agent: send the worked examples (prompts/main_agent_examples.json) first")
     ap.add_argument("--retry-invalid", default=None, metavar="RUN",
                     help="experiments/RUN: keep its valid answers, ask the main agent again only where the answer was "
                          "invalid (same stored findings), write the merged result to a new run")

@@ -5,7 +5,7 @@ import pytest
 
 from src.ada.rules import evaluate
 from src.agents.gnn_agents import oracle_findings
-from src.agents.main_agent import _parse, decide, load_config, rule_decide
+from src.agents.main_agent import EXAMPLES, _parse, decide, load_config, messages, rule_decide
 from tests.test_rules import RULES, SCENARIOS, two_rooms
 
 
@@ -101,6 +101,25 @@ def test_retry_once_on_invalid_json():
     local = FakeClient(["oops", GOOD])
     d = decide(FINDINGS, "local", load_config(), clients={"local": local})
     assert local.calls == 2 and d["label"] == "not_accessible"
+
+
+def test_few_shot_examples_agree_with_the_rule_main_agent():
+    """The worked examples must teach the same logic as the path search, and be valid answers."""
+    examples = json.loads(EXAMPLES.read_text(encoding="utf-8"))
+    assert {ex["answer"]["label"] for ex in examples} == {"accessible", "not_accessible"}
+    for ex in examples:
+        d, a = rule_decide(ex["findings"]), _parse(json.dumps(ex["answer"]))
+        assert a["label"] == d["label"], ex["case"]
+        assert {(f["element"], f["rule"]) for f in a["failing_rules"]} == \
+            {(f["element"], f["rule"]) for f in d["failing_rules"]}, ex["case"]
+
+
+def test_few_shot_messages_put_the_examples_before_the_building():
+    n = len(json.loads(EXAMPLES.read_text(encoding="utf-8")))
+    zero, few = messages(FINDINGS), messages(FINDINGS, few_shot=True)
+    assert [m["role"] for m in zero] == ["system", "user"]
+    assert len(few) == 2 + 2 * n and [m["role"] for m in few[1:3]] == ["user", "assistant"]
+    assert few[0] == zero[0] and few[-1] == zero[-1]
 
 
 def test_both_options_down_raises():

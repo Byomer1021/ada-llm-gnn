@@ -26,6 +26,11 @@ main_agent:
     base_url: null          # null = api.openai.com
     model: gpt-4.1-mini
     api_key_env: OPENAI_API_KEY
+  # few_shot = send 4 worked examples (prompts/main_agent_examples.json, hand-made buildings) before
+  # the building. Off by default: the planned design is zero-shot. For small models that take
+  # shortcuts (Qwen 7B pilot, 10 buildings: not_accessible on all, also where a room only could
+  # not turn around but blocked nothing)
+  few_shot: false
   temperature: 0
   max_tokens: 1500
   timeout_s: 120
