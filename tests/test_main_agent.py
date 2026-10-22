@@ -129,6 +129,16 @@ def test_a_building_without_rooms_is_not_checked():
         check_building({"rooms": [], "doors": [], "issues": []}, agents="oracle", provider="rule")
 
 
+def test_web_ui_falls_back_to_the_rule_main_agent_and_says_so():
+    from src.pipeline import check_building
+    down = {"local": FakeClient(error=ConnectionError("no server"))}
+    with pytest.raises(RuntimeError):  # evaluations: a failed main agent is an error, never hidden
+        check_building(SCENARIOS[1][1], agents="oracle", provider="local", clients=down)
+    res = check_building(SCENARIOS[1][1], agents="oracle", provider="local", clients=down, rule_fallback=True)
+    d = res["decision"]
+    assert d["provider"] == "rule:paths" and "no server" in d["fallback_reason"] and d["label"] == "not_accessible"
+
+
 def test_both_options_down_raises():
     with pytest.raises(RuntimeError):
         decide(FINDINGS, "auto", load_config(),

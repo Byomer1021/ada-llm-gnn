@@ -35,7 +35,9 @@ def get_agents(models_dir=None):
 
 
 def check_building(building: dict, agents: str = "gnn", provider: str | None = None, cfg: dict | None = None,
-                   clients: dict | None = None) -> dict:
+                   clients: dict | None = None, rule_fallback: bool = False) -> dict:
+    """rule_fallback (the web UI): if no LLM main agent can be reached, the rule main agent decides and
+    decision["fallback_reason"] says why. Off for the evaluations: there a failed answer counts as wrong."""
     cfg = cfg or load_config()
     if not building["rooms"]:  # "every room can be reached" would hold for no rooms at all
         raise ValueError("no rooms (IfcSpace) on the checked storey: the check needs the file's spaces")
@@ -43,7 +45,13 @@ def check_building(building: dict, agents: str = "gnn", provider: str | None = N
     findings = oracle_findings(building) if agents == "oracle" else \
         run_agents(building, get_agents(ROOT / cfg["agents"]["models_dir"]),
                    missing=cfg["agents"].get("missing_values", "not_checked"))
-    decision = decide(findings, provider=provider, cfg=cfg, clients=clients)
+    try:
+        decision = decide(findings, provider=provider, cfg=cfg, clients=clients)
+    except RuntimeError as e:  # every LLM option failed (no server, no key, invalid answers)
+        if not rule_fallback:
+            raise
+        decision = decide(findings, provider="rule", cfg=cfg)
+        decision["fallback_reason"] = str(e)
     return {"building": building, "findings": findings, "decision": decision,
             "report": make_report(building, decision, findings), "seconds": round(time.time() - t0, 2)}
 

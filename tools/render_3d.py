@@ -23,29 +23,44 @@ from mpl_toolkits.mplot3d import proj3d  # noqa: E402
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.ada.ifc_reader import read_ifc  # noqa: E402
+from src.ada.ifc_reader import _storey, read_ifc  # noqa: E402
 from src.ada.rules import evaluate  # noqa: E402
 
 CUT = 1.25  # cut walls at this height (m) so the inside is visible
+MAX_LABELS = 16  # more rooms + doors than this: only the failing doors are labelled
 LIGHT = np.array([0.4, -0.7, 0.9]) / np.linalg.norm([0.4, -0.7, 0.9])
 
 
 def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
-           failing: set[str] | None = None) -> str:
-    """failing = ids of the doors to draw red. None -> ask the rule engine (only for the
-    report / slides; the web UI passes the main agent's failing elements)."""
+           failing: set[str] | None = None, building: dict | None = None) -> str:
+    """failing = ids of the doors to draw red (ids as read_ifc gives them). None -> ask the rule
+    engine (only for the report / slides; the web UI passes the main agent's failing elements).
+    building = what read_ifc returned: only its rooms and doors (the checked storey) and the walls
+    of that storey are drawn, labelled with its ids (repeated IFC Names get #1, #2 there)."""
     model = ifcopenshell.open(ifc_path)
     s = G.settings()
     s.set("use-world-coords", True)
+    building = building or read_ifc(ifc_path)
     if failing is None:
-        result = evaluate(read_ifc(ifc_path))
+        result = evaluate(building)
         failing = {d for d, f in result["door_failures"].items() if f}
+    ids = {e["global_id"]: e["id"] for e in building["rooms"] + building["doors"] if e.get("global_id")}
+    spaces = [e for e in model.by_type("IfcSpace") if e.GlobalId in ids]
+    doors = [e for e in model.by_type("IfcDoor") if e.GlobalId in ids]
+    walls = model.by_type("IfcWall")
+    if building.get("storey", {}).get("storeys_in_file", 1) > 1:
+        on = {_storey(e) for e in spaces + doors}
+        walls = [w for w in walls if _storey(w) in on]
 
-    def mesh(e):
+    def raw(e):
         g = G.create_shape(s, e).geometry
-        v = np.array(g.verts).reshape(-1, 3)
-        f = np.array(g.faces).reshape(-1, 3)
-        v[:, 2] = np.minimum(v[:, 2], CUT)
+        return np.array(g.verts).reshape(-1, 3), np.array(g.faces).reshape(-1, 3)
+
+    floor = min((raw(e)[0][:, 2].min() for e in spaces), default=0.0)
+
+    def mesh(e):  # cut walls CUT above the storey's floor so the inside is visible
+        v, f = raw(e)
+        v[:, 2] = np.minimum(v[:, 2], floor + CUT)
         return v, f
 
     fig = plt.figure(figsize=(7, 5.6), dpi=300)
@@ -64,7 +79,7 @@ def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
         groups[group].append((tri, cols))
         allv.append(v)
 
-    for e in model.by_type("IfcSpace"):
+    for e in spaces:
         v, f = mesh(e)
         z0 = v[:, 2].min()
         keep = np.array([t for t in f if np.allclose(v[t][:, 2], z0)])
@@ -72,10 +87,10 @@ def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
         v2[:, 2] = z0 + 0.01
         if len(keep):
             add(v2, keep, "#E3EEF8", "floor")
-    for e in model.by_type("IfcWall"):
+    for e in walls:
         add(*mesh(e), "#D5DBE1", "wall")
-    for e in model.by_type("IfcDoor"):
-        add(*mesh(e), "#C0392B" if (e.Name or e.GlobalId) in failing else "#1B7447", "door")
+    for e in doors:
+        add(*mesh(e), "#C0392B" if ids[e.GlobalId] in failing else "#1B7447", "door")
     for z, group in enumerate(("floor", "wall", "door")):
         if groups[group]:
             tri = np.concatenate([t for t, _ in groups[group]])
@@ -90,7 +105,7 @@ def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
     c = (lo + hi) / 2
     ax.set_xlim(c[0] - span / 2, c[0] + span / 2)
     ax.set_ylim(c[1] - span / 2, c[1] + span / 2)
-    ax.set_zlim(-span * 0.3, span * 0.7)
+    ax.set_zlim(floor - span * 0.3, floor + span * 0.7)  # storeys above sea level (hitos: 20 m) too
     ax.set_box_aspect((1, 1, 1))
     ax.view_init(elev=elev, azim=azim)
     ax.set_axis_off()
@@ -102,15 +117,22 @@ def render(ifc_path: str, out_png: str, elev: float = 42, azim: float = -60,
                     bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=col, lw=1.2), annotation_clip=False,
                     zorder=1000)
 
-    for e in model.by_type("IfcSpace"):
+    few = len(spaces) + len(doors) <= MAX_LABELS  # a large real storey: only the failing doors get a label
+
+    def short(name):  # Revit: "Family:Type:ElementId" -> the ElementId (it is in the report's full name)
+        return name.rsplit(":", 1)[-1] if ":" in name and len(name) > 20 else name
+
+    for e in spaces if few else []:
         v, _ = mesh(e)
         cc = v.mean(0)
-        label(cc[0], cc[1], 0.1, e.Name or "?", "#15202B", 15)
-    for e in model.by_type("IfcDoor"):
+        label(cc[0], cc[1], floor + 0.1, short(ids[e.GlobalId]), "#15202B", 15)
+    for e in doors:
         v, _ = mesh(e)
         cc = v.mean(0)
-        name = e.Name or "?"
-        label(cc[0], cc[1], v[:, 2].max() + 0.5, name, "#C0392B" if name in failing else "#1B7447", 13)
+        name = ids[e.GlobalId]
+        if few or name in failing:
+            label(cc[0], cc[1], v[:, 2].max() + 0.5, short(name), "#C0392B" if name in failing else "#1B7447",
+                  13 if few else 9)
     plt.subplots_adjust(0, 0, 1, 1)
     Path(out_png).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_png, facecolor="white")
